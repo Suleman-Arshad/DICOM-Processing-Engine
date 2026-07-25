@@ -1,7 +1,6 @@
 #include "dicom_processor/parser.hpp"
 #include "dicom_processor/dictionary.hpp"
-#include "dicom_processor/tag.hpp"
-#include <algorithm>
+
 #include <cstddef>
 #include <cstring>
 #include <fstream>
@@ -94,9 +93,6 @@ namespace dicom
         };
 
         constexpr uint32_t kUndefinedLength = 0xFFFFFFFFu;
-
-        // Header info for one element, read from the stream. The parser uses this to
-        // decide how to read the element's value bytes (length, VR, etc.).
         struct ElementHeader
         {
             Tag tag;
@@ -129,7 +125,6 @@ namespace dicom
             return ElementHeader{tag, vr, length};
         }
 
-        // Skips over a sequence's value bytes, which may be either a fixed length or undefined length. For undefined-length sequences, reads Items until the Sequence Delimitation Item.
         void skipSequence(ByteCursor &cursor, uint32_t declaredLength, bool explicitVR, bool bigEndian)
         {
             if (declaredLength != kUndefinedLength)
@@ -158,8 +153,6 @@ namespace dicom
                     cursor.skip(itemLength);
                     continue;
                 }
-
-                // Undefined-length Item: read elements until the Item Delimitation
                 throw ParseError(
                     "Undefined-length sequence items are not yet supported by this "
                     "parser. None of the CT/MRI/X-Ray sample files used in Week 5 "
@@ -273,9 +266,6 @@ namespace dicom
 
             if (header.length == kUndefinedLength)
             {
-                // Only SQ and encapsulated (compressed) Pixel Data legitimately
-                // use undefined length; we already reject compressed transfer
-                // syntaxes earlier, so reaching this means a malformed file.
                 throw ParseError("Unexpected undefined length on a non-sequence element");
             }
 
@@ -290,6 +280,7 @@ namespace dicom
         slice.rows = dataset.getUInt16(tags::Rows, bigEndian).value_or(0);
         slice.columns = dataset.getUInt16(tags::Columns, bigEndian).value_or(0);
         slice.bitsAllocated = dataset.getUInt16(tags::BitsAllocated, bigEndian).value_or(16);
+        slice.pixelRepresentationSigned = dataset.getUInt16(tags::PixelRepresentation, bigEndian).value_or(0) != 0;
         slice.rescaleSlope = dataset.getDouble(tags::RescaleSlope).value_or(1.0);
         slice.rescaleIntercept = dataset.getDouble(tags::RescaleIntercept).value_or(0.0);
 
@@ -312,8 +303,11 @@ namespace dicom
             {
                 const auto b0 = static_cast<uint8_t>((*pixelBytes)[i * 2]);
                 const auto b1 = static_cast<uint8_t>((*pixelBytes)[i * 2 + 1]);
-                slice.pixels[i] = bigEndian ? static_cast<uint16_t>((b0 << 8) | b1)
-                                            : static_cast<uint16_t>((b1 << 8) | b0);
+                const uint16_t raw16 = bigEndian ? static_cast<uint16_t>((b0 << 8) | b1)
+                                                 : static_cast<uint16_t>((b1 << 8) | b0);
+                slice.pixels[i] = slice.pixelRepresentationSigned
+                                      ? static_cast<int32_t>(static_cast<int16_t>(raw16))
+                                      : static_cast<int32_t>(raw16);
             }
         }
         else if (slice.bitsAllocated == 8)
@@ -324,7 +318,10 @@ namespace dicom
             }
             for (size_t i = 0; i < expectedPixelCount; ++i)
             {
-                slice.pixels[i] = static_cast<uint16_t>(static_cast<uint8_t>((*pixelBytes)[i]));
+                const auto raw8 = static_cast<uint8_t>((*pixelBytes)[i]);
+                slice.pixels[i] = slice.pixelRepresentationSigned
+                                      ? static_cast<int32_t>(static_cast<int8_t>(raw8))
+                                      : static_cast<int32_t>(raw8);
             }
         }
         else
