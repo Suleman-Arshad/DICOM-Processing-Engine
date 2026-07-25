@@ -27,13 +27,8 @@ target_include_directories(dicom_ingestion PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-# AVX2 flags reserved for the Processing Layer (Week 7); harmless on the
-# ingestion sources today since none of them use intrinsics yet, but
-# applying them at the target level now avoids a build-system change later.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(dicom_ingestion PUBLIC -mavx2 -mfma -Wall -Wextra -Wpedantic)
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-    target_compile_options(dicom_ingestion PUBLIC /arch:AVX2)
+    target_compile_options(dicom_ingestion PUBLIC -Wall -Wextra -Wpedantic)
 endif()
 
 # --- Main executable ---------------------------------------------------
