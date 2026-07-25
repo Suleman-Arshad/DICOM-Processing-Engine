@@ -12,6 +12,7 @@ namespace
         std::cout << "Modality:          " << slice.modality << '\n';
         std::cout << "Rows x Columns:    " << slice.rows << " x " << slice.columns << '\n';
         std::cout << "Bits Allocated:    " << slice.bitsAllocated << '\n';
+        std::cout << "Pixel Repr.:       " << (slice.pixelRepresentationSigned ? "signed" : "unsigned") << '\n';
         std::cout << "Rescale Slope:     " << slice.rescaleSlope << '\n';
         std::cout << "Rescale Intercept: " << slice.rescaleIntercept << '\n';
         std::cout << "Pixel Count:       " << slice.pixels.size() << '\n';
