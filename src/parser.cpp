@@ -12,6 +12,14 @@ namespace dicom
 
     namespace
     {
+
+        // ---------------------------------------------------------------------
+        // Low-level byte cursor over the whole file, read once into memory. DICOM
+        // files in this project's scope (single CT/MRI/X-Ray slices) are small
+        // enough that reading the whole file up front is simpler and faster than
+        // streaming, and it keeps every length check as a simple bounds check
+        // against `bytes.size()`.
+        // ---------------------------------------------------------------------
         class ByteCursor
         {
         public:
@@ -93,6 +101,7 @@ namespace dicom
         };
 
         constexpr uint32_t kUndefinedLength = 0xFFFFFFFFu;
+
         struct ElementHeader
         {
             Tag tag;
@@ -153,6 +162,7 @@ namespace dicom
                     cursor.skip(itemLength);
                     continue;
                 }
+
                 throw ParseError(
                     "Undefined-length sequence items are not yet supported by this "
                     "parser. None of the CT/MRI/X-Ray sample files used in Week 5 "
@@ -266,6 +276,7 @@ namespace dicom
 
             if (header.length == kUndefinedLength)
             {
+                // Only SQ and encapsulated (compressed) Pixel Data legitimately use undefined length; we already reject compressed transfer syntaxes earlier, so reaching this means a malformed file.
                 throw ParseError("Unexpected undefined length on a non-sequence element");
             }
 
@@ -283,6 +294,17 @@ namespace dicom
         slice.pixelRepresentationSigned = dataset.getUInt16(tags::PixelRepresentation, bigEndian).value_or(0) != 0;
         slice.rescaleSlope = dataset.getDouble(tags::RescaleSlope).value_or(1.0);
         slice.rescaleIntercept = dataset.getDouble(tags::RescaleIntercept).value_or(0.0);
+
+        if (const auto pos = dataset.getDoubleList(tags::ImagePositionPatient); pos.size() >= 3)
+        {
+            slice.imagePositionZ = pos[2];
+        }
+        if (const auto spacing = dataset.getDoubleList(tags::PixelSpacing); spacing.size() >= 2)
+        {
+            slice.pixelSpacingRowMM = spacing[0];
+            slice.pixelSpacingColMM = spacing[1];
+        }
+        slice.sliceThicknessMM = dataset.getDouble(tags::SliceThickness).value_or(1.0);
 
         const auto *pixelBytes = dataset.getRawBytes(tags::PixelData);
         if (pixelBytes == nullptr)
