@@ -15,6 +15,9 @@ namespace
         std::cout << "Pixel Repr.:       " << (slice.pixelRepresentationSigned ? "signed" : "unsigned") << '\n';
         std::cout << "Rescale Slope:     " << slice.rescaleSlope << '\n';
         std::cout << "Rescale Intercept: " << slice.rescaleIntercept << '\n';
+        std::cout << "Image Position Z:  " << slice.imagePositionZ << " mm\n";
+        std::cout << "Pixel Spacing:     " << slice.pixelSpacingRowMM << " x " << slice.pixelSpacingColMM << " mm\n";
+        std::cout << "Slice Thickness:   " << slice.sliceThicknessMM << " mm\n";
         std::cout << "Pixel Count:       " << slice.pixels.size() << '\n';
 
         if (slice.pixels.empty())
@@ -33,6 +36,7 @@ namespace
             std::cout << "HU range:          [" << huMin << ", " << huMax << "]\n";
         }
 
+        // Print a small top-left patch as a sanity-check sample, capped at 5x5 so this stays readable for both tiny synthetic test files and full 512x512 clinical images.
         const int patch = std::min({5, slice.rows, slice.columns});
         std::cout << "Top-left " << patch << "x" << patch << " raw pixel patch:\n";
         for (int y = 0; y < patch; ++y)
