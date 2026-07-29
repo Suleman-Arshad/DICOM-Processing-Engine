@@ -32,6 +32,10 @@ namespace dicom
         bool pixelRepresentationSigned{false}; // from (0028,0103): false=unsigned, true=signed
         double rescaleSlope{1.0};
         double rescaleIntercept{0.0};
+        double imagePositionZ{0.0};    // (0020,0032) third component, mm
+        double pixelSpacingRowMM{1.0}; // (0028,0030) first value, mm between rows
+        double pixelSpacingColMM{1.0}; // (0028,0030) second value, mm between columns
+        double sliceThicknessMM{1.0};  // (0018,0050), mm
 
         double huAt(int x, int y) const
         {
