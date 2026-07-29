@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(DicomProcessor
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "Multi-threaded C++20 DICOM Image Processing Pipeline"
     LANGUAGES CXX
 )
@@ -16,7 +16,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
 
-# --- Ingestion library ------------------------------------------------------
+# --- Ingestion library -------------------------------------------
 add_library(dicom_ingestion STATIC
     src/vr.cpp
     src/dictionary.cpp
@@ -31,9 +31,36 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang
     target_compile_options(dicom_ingestion PUBLIC -Wall -Wextra -Wpedantic)
 endif()
 
-# --- Main executable ---------------------------------------------------
+# --- Reconstruction library (Week 6) ---------------------------------------
+add_library(dicom_reconstruction STATIC
+    src/voxel_volume.cpp
+    src/reconstruction.cpp
+)
+target_link_libraries(dicom_reconstruction PUBLIC dicom_ingestion)
+
+# --- Processing library -------------------------------------------
+add_library(dicom_processing STATIC
+    src/filters_scalar.cpp
+    src/filters_avx2.cpp
+    src/filters_dispatch.cpp
+)
+target_link_libraries(dicom_processing PUBLIC dicom_reconstruction)
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set_source_files_properties(src/filters_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    set_source_files_properties(src/filters_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
+endif()
+
+# --- Executables -----------------------------------------------------------
 add_executable(dicom_processor src/main.cpp)
 target_link_libraries(dicom_processor PRIVATE dicom_ingestion)
+
+add_executable(volume_reconstructor src/reconstruct_main.cpp)
+target_link_libraries(volume_reconstructor PRIVATE dicom_reconstruction)
+
+add_executable(filter_benchmark src/benchmark_main.cpp)
+target_link_libraries(filter_benchmark PRIVATE dicom_processing)
 
 # --- Optional DCMTK cross-verification tool -----------------------------
 option(BUILD_DCMTK_VERIFY_TOOL "Build the optional DCMTK cross-verification tool" ON)
