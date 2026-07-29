@@ -27,8 +27,6 @@ namespace dicom
         std::string text(reinterpret_cast<const char *>(element->value.data()),
                          element->value.size());
 
-        // DICOM pads string values to an even length with a trailing space
-        // (or, for UI specifically, a trailing null byte). Strip either.
         while (!text.empty() && (text.back() == ' ' || text.back() == '\0'))
         {
             text.pop_back();
@@ -72,6 +70,34 @@ namespace dicom
     {
         const Element *element = find(tag);
         return element != nullptr ? &element->value : nullptr;
+    }
+
+    std::vector<double> Dataset::getDoubleList(Tag tag) const
+    {
+        std::vector<double> values;
+        const auto text = getString(tag);
+        if (!text.has_value() || text->empty())
+            return values;
+
+        size_t start = 0;
+        while (start <= text->size())
+        {
+            const size_t sep = text->find('\\', start);
+            const std::string token =
+                (sep == std::string::npos) ? text->substr(start) : text->substr(start, sep - start);
+            try
+            {
+                values.push_back(std::stod(token));
+            }
+            catch (const std::exception &)
+            {
+                values.push_back(0.0);
+            }
+            if (sep == std::string::npos)
+                break;
+            start = sep + 1;
+        }
+        return values;
     }
 
 } // namespace dicom
