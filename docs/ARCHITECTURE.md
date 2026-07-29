@@ -1,8 +1,8 @@
 # Architecture Design Document
 ## High-Performance Medical Imaging Pipeline (DICOM Processor)
 
-**Version:** 0.1 (Week 5 baseline)
-**Status:** Living document — updated at the end of each week as layers are implemented.
+**Version:** 0.2 (Week 6 baseline)
+**Status:** Living document - updated at the end of each week as layers are implemented.
 
 ---
 
@@ -70,12 +70,12 @@ DCMTK/ITK far more heavily than this project does by design.
  └────────┬────────────────────┘
           │  Filtered VoxelVolume
           ▼
- ┌────────────────────────────────┐
- │  4. DETECTION LAYER            │
- │  - Seed selection(HU threshold)│
- │  - 3D region growing (26-conn.)│
- │  - Candidate scoring/filtering │
- └────────┬───────────────────────┘
+ ┌──────────────────────────────────┐
+ │  4. DETECTION LAYER              │
+ │  - Seed selection (HU threshold) │
+ │  - 3D region growing (26-conn.)  │
+ │  - Candidate scoring/filtering   │
+ └────────┬─────────────────────────┘
           │  vector<Anomaly> { centroid, bbox, volume, mean HU }
           ▼
  ┌─────────────────────────────┐
@@ -141,14 +141,19 @@ private:
     std::unordered_map<DicomTag, DicomElement> elements_;
 };
 
-struct DicomSlice {
+struct DicomSlice {  // as-built: dicom::Slice in include/dicom_processor/parser.hpp
     DicomDataset metadata;
-    std::vector<uint16_t> pixelData;    // decoded, native endianness
+    std::vector<int32_t> pixels;        // decoded, sign-corrected per PixelRepresentation
     int rows{};
     int columns{};
-    double sliceLocation{};
+    bool pixelRepresentationSigned{false};
     double rescaleSlope{1.0};
     double rescaleIntercept{0.0};
+    // Added in Week 6 for the Reconstruction Layer:
+    double imagePositionZ{0.0};         // (0020,0032) 3rd component, mm
+    double pixelSpacingRowMM{1.0};      // (0028,0030) 1st value, mm
+    double pixelSpacingColMM{1.0};      // (0028,0030) 2nd value, mm
+    double sliceThicknessMM{1.0};       // (0018,0050), mm
 };
 ```
 
@@ -162,6 +167,7 @@ struct DicomSlice {
 | Long-form VR lengths | `OB, OW, OF, SQ, UT, UN` use a 4-byte length field (with 2 reserved bytes first); all others use 2-byte length. Getting this wrong misaligns every subsequent tag in the file. |
 | Sequences (SQ) | Recursive: a sequence contains items, each item is itself a nested dataset. Parsed depth-first. |
 | Pixel Data (7FE0,0010) | For uncompressed transfer syntaxes, raw pixel bytes; length may be `0xFFFFFFFF` (undefined length) for encapsulated/compressed pixel data using Basic Offset Table + fragments — out of scope for Week 5, detected and reported as "unsupported" rather than silently mishandled. |
+| Pixel Representation (0028,0103) | Determines whether pixel bytes are signed (two's complement) or unsigned. Getting this wrong doesn't crash anything — it silently produces wrong numbers: a real-world bug caught during testing had a CT file's signed `-2000` background-padding sentinel decode as unsigned `63536`, propagating into a physically impossible HU value. Fixed by reinterpreting the raw bit pattern per this tag rather than assuming unsigned. |
 
 ### 3.4 Validation strategy for Week 5
 
@@ -178,57 +184,94 @@ parser bug, full stop — DCMTK is the ground truth for this comparison only.
 
 ## 4. Layer 2 — Reconstruction Layer
 
-**Input:** `std::vector<DicomSlice>` (one series, unordered).
+**Status: implemented (Week 6).** `VolumeReconstructor::reconstruct()` in
+`src/reconstruction.cpp`, backed by the `VoxelVolume` type in
+`include/dicom_processor/voxel_volume.hpp`.
+
+**Input:** `std::vector<Slice>` (one series, unordered; `Slice` is the
+Week 5 parser's output type, extended in Week 6 with `imagePositionZ`,
+`pixelSpacingRowMM`/`pixelSpacingColMM`, and `sliceThicknessMM`).
 **Output:** `VoxelVolume` (dense 3D grid, isotropic spacing).
 
 ### 4.1 Slice ordering
 
-Sort by `ImagePositionPatient` (0020,0032) projected onto the series'
-normal vector — *not* by filename or `InstanceNumber`, which can be
-unreliable or absent.
+Slices are sorted by `ImagePositionPatient`'s Z component (0020,0032,
+third value) — *not* by filename or `InstanceNumber`, which can be
+unreliable or absent. Files missing this tag default to Z=0mm; a series
+where every slice is missing it will sort arbitrarily (stable relative to
+input order), which is a known limitation worth flagging if it ever
+matters for a specific dataset — see §11.
 
 ### 4.2 Hounsfield Unit normalization
 
-For CT series, raw pixel values are converted using the per-slice rescale
-parameters:
+For CT series, each slice's raw pixel values are converted using *that
+slice's own* rescale parameters (slices in a series can legitimately carry
+different `RescaleSlope`/`RescaleIntercept`):
 
 ```
 HU = pixelValue * RescaleSlope + RescaleIntercept
 ```
 
-(`RescaleSlope`/`RescaleIntercept` come from tags `(0028,1053)`/`(0028,1052)`
-and can legitimately differ slice-to-slice.) MRI/X-Ray series lack a
-standardized HU scale; those modalities are stored as normalized intensity
-in `[0, 1]` instead, with modality tracked in `VoxelVolume::modality`.
+MRI/X-Ray series lack a standardized HU scale; those modalities pass
+through with whatever rescale the file provides (typically slope=1,
+intercept=0, i.e. a no-op), with the actual modality tracked in
+`VoxelVolume::modality`.
 
 ### 4.3 Trilinear interpolation
 
-Slice thickness and pixel spacing are rarely isotropic (e.g., 0.7mm × 0.7mm
-in-plane, 3mm between slices). To build a volume with uniform voxel spacing,
-each output voxel's HU value is computed as a trilinear blend of the 8
-nearest input voxels:
+Slice thickness and pixel spacing are rarely isotropic (e.g. 1mm × 1mm
+in-plane, 2mm between slices). To build a volume with uniform voxel
+spacing, the reconstructor:
+
+1. Builds an intermediate anisotropic grid at native resolution
+   (`rows × columns × sliceCount`), with every voxel already converted to
+   HU per §4.2.
+2. Picks a target isotropic spacing — by default, the smallest of the
+   three native spacing dimensions, so reconstruction never upsamples an
+   axis beyond what the source data actually resolves. Callers can
+   override this via `reconstruct(slices, targetSpacingMM)`.
+3. For each output voxel, maps back to fractional coordinates in the
+   native grid and trilinearly blends the 8 nearest native voxels,
+   clamping at the grid's edges.
 
 ```cpp
 struct VoxelVolume {
     int width, height, depth;
     double voxelSpacingMM;         // isotropic, post-interpolation
-    std::vector<float> data;       // width*height*depth, row-major
     Modality modality;
-
+    std::vector<float> data;       // width*height*depth, row-major
     float at(int x, int y, int z) const {
         return data[(z * height + y) * width + x];
     }
 };
 ```
 
-Interpolation is embarrassingly parallel per output voxel and is the first
-candidate for thread-pool parallelization (Week 6/7).
+**Correctness check performed:** trilinear interpolation is mathematically
+exact on linear data (a fundamental property of linear interpolation), so
+the implementation was verified by reconstructing a synthetic volume with
+a known linear HU gradient and confirming the output matched the analytic
+answer exactly (within float rounding) at every voxel — not just spot-
+checked informally.
+
+Interpolation is embarrassingly parallel per output voxel and remains a
+strong candidate for thread-pool parallelization once the Week 7
+concurrency layer lands (see §12).
 
 ---
 
 ## 5. Layer 3 — Processing Layer
 
-### 5.1 Thread pool
+**Status: SIMD filters implemented (Week 6); thread pool not yet built
+(Week 7).** Implementations in `src/filters_scalar.cpp` (portable
+reference), `src/filters_avx2.cpp` (AVX2-accelerated), and
+`src/filters_dispatch.cpp` (runtime CPU-capability dispatch). Public
+interface: `include/dicom_processor/filters.hpp`.
+
+### 5.1 Thread pool — planned, Week 7
+
+Not yet implemented. Filters currently run single-threaded (parallelized
+only via AVX2 lanes, not across CPU cores); the thread pool design below
+is retained as the Week 7 target:
 
 ```cpp
 class ThreadPool {
@@ -248,21 +291,50 @@ private:
 };
 ```
 
-Volume-processing tasks are chunked along the Z axis (one task per N slices)
-so each worker operates on a contiguous, cache-friendly memory region with
-no false sharing between threads.
+Volume-processing tasks will be chunked along the Z axis (one task per N
+slices) so each worker operates on a contiguous, cache-friendly memory
+region with no false sharing between threads.
 
-### 5.2 SIMD filters (AVX2)
+### 5.2 SIMD filters (AVX2) — implemented, Week 6
 
-| Filter | Approach |
-|---|---|
-| Gaussian blur | Separable 1D convolution (horizontal then vertical pass), each pass vectorized over 8 `float`s via `__m256`. |
-| Edge detection | Sobel operator; gradients computed with `_mm256_mul_ps`/`_mm256_add_ps` across 8-wide lanes, magnitude via `_mm256_sqrt_ps`. |
-| Histogram equalization | Histogram bucket accumulation is scalar (data-dependent, hard to vectorize safely); the intensity remapping pass over the volume is vectorized. |
+| Filter | Approach | Measured speedup* |
+|---|---|---|
+| Gaussian blur | Separable convolution (horizontal then vertical pass). Interior columns/rows vectorized 8-wide via `__m256` + `_mm256_fmadd_ps`; border pixels (where clamped neighbors would need per-lane divergent indices) fall back to scalar. | ~5.7–5.9x |
+| Sobel edge detection | 3×3 gradient kernels. Interior pixels vectorized (row above/current/below loaded as three `__m256` triples, shifted by -1/0/+1 in X); left/right border columns computed scalar. Magnitude via `_mm256_sqrt_ps`. | ~14–16x |
+| Histogram equalization | Histogram bucket accumulation and CDF construction are scalar (data-dependent, would need cross-lane conflict resolution to vectorize safely — not attempted). The remapping pass is vectorized: `_mm256_cvttps_epi32` computes each voxel's bin index, `_mm256_i32gather_ps` looks up the corresponding CDF value, then `_mm256_fmadd_ps` rescales it back to the original value range. | ~1.3x |
 
-Runtime AVX2 detection (via `__builtin_cpu_supports("avx2")` /
-`cpuid` on MSVC) gates SIMD code paths, with a scalar fallback so the binary
-doesn't crash with `SIGILL` on non-AVX2 hardware.
+\* From `filter_benchmark` on a 256×256×32 synthetic volume, 5-iteration
+average, this development machine. Actual speedup on your hardware will
+vary — the histogram equalization figure in particular is expected to stay
+modest anywhere, since roughly half its work (histogram + CDF) is
+inherently scalar by design.
+
+**Runtime AVX2 dispatch:** every filter has three entry points —
+`<name>Scalar`, `<name>AVX2`, and a plain `<name>()` that auto-dispatches
+based on `cpuSupportsAVX2()` (via `__builtin_cpu_supports("avx2")`).
+Production code should call the auto-dispatching form; the explicit
+Scalar/AVX2 variants exist so the benchmark tool can force either path
+deliberately and so tests can verify they agree.
+
+**Build-level AVX2 isolation (important — this is a lesson learned, not
+just a design choice):** an earlier iteration of this project applied
+`-mavx2` at the *library* level to the Ingestion Layer, which let the
+compiler auto-vectorize ordinary loops with AVX2 instructions even though
+that code never touched an intrinsic — this crashed with `SIGILL` on
+non-AVX2 hardware despite having a "runtime check" elsewhere in the
+codebase, because the crashing code wasn't gated by that check at all.
+The fix, applied here: `-mavx2 -mfma` is scoped via CMake's
+`set_source_files_properties()` to exactly one file,
+`src/filters_avx2.cpp` — verified by disassembling the compiled objects
+and confirming zero AVX2 (`ymm`-register) instructions appear anywhere
+outside that one file.
+
+**Correctness gate:** `filter_benchmark` refuses to report any timing
+numbers unless AVX2 output first matches the scalar reference within a
+small epsilon (`1e-1`, chosen for float32 accumulation-order tolerance
+across different summation orders) — a fast-but-wrong implementation is
+worse than a slow-but-right one, and it shouldn't be possible to
+accidentally ship a benchmark result for the former.
 
 ---
 
@@ -375,13 +447,13 @@ layer holds a lock for longer than a queue push/pop.
 
 ## 10. Testing Strategy
 
-| Layer | Test approach |
-|---|---|
-| Ingestion | Unit tests per VR type; round-trip byte fixtures for Explicit/Implicit and Little/Big Endian; parser-vs-DCMTK diff on real sample files. |
-| Reconstruction | Known-input synthetic volumes (e.g., a linear gradient) to verify interpolation math analytically. |
-| Processing | Compare AVX2 filter output against a scalar reference implementation, bit-for-bit or within float epsilon. |
-| Detection | Synthetic volumes with planted spheres of known HU/size to verify recall and bounding-box accuracy. |
-| Output | JSON schema validation; PNG round-trip (write then re-read, compare pixels). |
+| Layer | Test approach | Status |
+|---|---|---|
+| Ingestion | Unit tests per VR type; round-trip byte fixtures for Explicit/Implicit and Little/Big Endian; parser-vs-DCMTK diff on real sample files. | ✅ Done (Week 5) |
+| Reconstruction | Known-input synthetic volumes (linear HU gradient) to verify interpolation math analytically — output must equal the analytic answer exactly, not just look reasonable. | ✅ Done (Week 6) |
+| Processing | AVX2 filter output compared against scalar reference on a non-multiple-of-8 volume (stresses boundary/tail code paths), within float epsilon. `filter_benchmark` refuses to report timings if this check fails. | ✅ Done (Week 6) |
+| Detection | Synthetic volumes with planted spheres of known HU/size to verify recall and bounding-box accuracy. | ⏳ Planned |
+| Output | JSON schema validation; PNG round-trip (write then re-read, compare pixels). | ⏳ Planned |
 
 Sample DICOM corpus: synthetic/de-identified test files only (e.g., public
 datasets from TCIA or DICOM library test suites) — no real patient data
@@ -400,20 +472,36 @@ under any circumstance.
 - **Patient data privacy:** all sample/test files must be synthetic or
   properly de-identified; this is a hard project constraint, not a
   nice-to-have.
+- **Slice ordering fallback:** a series where every slice is missing
+  `ImagePositionPatient` sorts arbitrarily (stable relative to input file
+  order) rather than failing outright — acceptable for now since real CT/MR
+  series reliably include this tag, but worth revisiting if a sample series
+  ever lacks it.
+- **Single-threaded filters (for now):** AVX2 gives per-core throughput,
+  but nothing yet parallelizes across cores — the Week 7 thread pool is
+  what unlocks that; see §5.1.
 - **Region growing sensitivity:** HU tolerance and minimum-size thresholds
   are currently fixed constants; tuning per modality/anatomy is a known
-  future improvement, not a Week 5–7 blocker.
-- **Single-machine scope:** no distributed processing; thread pool is
-  bounded by `std::thread::hardware_concurrency()` on one machine.
+  future improvement, not a near-term blocker.
+- **Single-machine scope:** no distributed processing; the planned thread
+  pool is bounded by `std::thread::hardware_concurrency()` on one machine.
 
 ---
 
 ## 12. Week-by-Week Traceability
 
-| Week | Layer(s) touched | Deliverable |
-|---|---|---|
-| 5 | Ingestion | Environment setup, custom binary parser, CT/MRI/X-Ray metadata + pixel extraction |
-| 6 | Reconstruction | Slice stacking, HU normalization, trilinear interpolation |
-| 7 | Processing | Thread pool, AVX2 filters |
-| 8 | Detection | 3D region growing |
-| 9 | Output | PNG/DICOM/JSON export, end-to-end pipeline integration |
+| Week | Layer(s) touched | Deliverable | Status |
+|---|---|---|---|
+| 5 | Ingestion | Environment setup, custom binary parser, CT/MRI/X-Ray metadata + pixel extraction | ✅ Done |
+| 6 | Reconstruction + Processing (SIMD only) | Trilinear-interpolated volume reconstruction, HU normalization, AVX2 Gaussian blur / Sobel edge / histogram equalization, scalar-vs-AVX2 benchmark | ✅ Done |
+| 7 | Processing (concurrency) | `std::thread`-based thread pool; parallelize reconstruction and filtering across CPU cores | ⏳ Planned |
+| 8 | Detection | 3D region growing for density anomalies | ⏳ Planned |
+| 9 | Output | PNG/DICOM/JSON export, end-to-end pipeline integration | ⏳ Planned |
+
+This table is the anchor for internship progress reviews — each row should
+be checked off with a link to the corresponding PR/commit once complete.
+Note that Weeks 6–9 above reflect the actual delivery schedule as it
+evolved (Reconstruction and the AVX2 half of Processing were combined into
+Week 6, with the thread-pool/concurrency half of Processing deferred to
+Week 7) rather than the original per-layer-per-week split sketched when
+this document was first drafted.
