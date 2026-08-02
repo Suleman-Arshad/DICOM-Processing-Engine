@@ -133,8 +133,18 @@ No DICOM files needed — this builds a synthetic 256×256×32 volume, first
 verifies every AVX2 filter's output matches its scalar reference within a
 small epsilon (refusing to print timings if it doesn't), then reports a
 scalar-vs-AVX2 timing table for Gaussian blur, Sobel edge detection, and
-histogram equalization. Exits early with a clear message on CPUs without
-AVX2, rather than reporting a meaningless comparison.
+histogram equalization. On a CPU without AVX2, it automatically falls
+back to reporting scalar-only throughput (still genuinely useful
+single-threaded performance data) rather than exiting with nothing. Force
+that same scalar-only report on any machine with `./build/filter_benchmark
+--scalar-only`.
+
+**Always benchmark the binary CMake actually built** (`cmake --build
+build`), not a hand-typed `g++` command missing `-O2` — an unoptimized
+build doesn't just run slower uniformly, it can distort relative
+comparisons between code paths badly enough to produce a wrong
+conclusion. See `ARCHITECTURE.md` §5.2 for a concrete example of exactly
+that happening during this project's own development.
 
 ### Supported vs. unsupported input
 
