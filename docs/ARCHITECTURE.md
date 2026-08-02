@@ -2,7 +2,7 @@
 ## High-Performance Medical Imaging Pipeline (DICOM Processor)
 
 **Version:** 0.2 (Week 6 baseline)
-**Status:** Living document - updated at the end of each week as layers are implemented.
+**Status:** Living document — updated at the end of each week as layers are implemented.
 
 ---
 
@@ -240,6 +240,7 @@ struct VoxelVolume {
     double voxelSpacingMM;         // isotropic, post-interpolation
     Modality modality;
     std::vector<float> data;       // width*height*depth, row-major
+
     float at(int x, int y, int z) const {
         return data[(z * height + y) * width + x];
     }
@@ -299,15 +300,29 @@ region with no false sharing between threads.
 
 | Filter | Approach | Measured speedup* |
 |---|---|---|
-| Gaussian blur | Separable convolution (horizontal then vertical pass). Interior columns/rows vectorized 8-wide via `__m256` + `_mm256_fmadd_ps`; border pixels (where clamped neighbors would need per-lane divergent indices) fall back to scalar. | ~5.7–5.9x |
-| Sobel edge detection | 3×3 gradient kernels. Interior pixels vectorized (row above/current/below loaded as three `__m256` triples, shifted by -1/0/+1 in X); left/right border columns computed scalar. Magnitude via `_mm256_sqrt_ps`. | ~14–16x |
-| Histogram equalization | Histogram bucket accumulation and CDF construction are scalar (data-dependent, would need cross-lane conflict resolution to vectorize safely — not attempted). The remapping pass is vectorized: `_mm256_cvttps_epi32` computes each voxel's bin index, `_mm256_i32gather_ps` looks up the corresponding CDF value, then `_mm256_fmadd_ps` rescales it back to the original value range. | ~1.3x |
+| Gaussian blur | Separable convolution (horizontal then vertical pass). Interior columns/rows vectorized 8-wide via `__m256` + `_mm256_fmadd_ps`; border pixels (where clamped neighbors would need per-lane divergent indices) fall back to scalar. | ~6.1–6.4x |
+| Sobel edge detection | 3×3 gradient kernels. Interior pixels vectorized (row above/current/below loaded as three `__m256` triples, shifted by -1/0/+1 in X); left/right border columns computed scalar. Magnitude via `_mm256_sqrt_ps`. | ~13–15x |
+| Histogram equalization | Histogram bucket accumulation and CDF construction are scalar (data-dependent, would need cross-lane conflict resolution to vectorize safely — not attempted). The remapping pass is vectorized: `_mm256_cvttps_epi32` computes each voxel's bin index, `_mm256_i32gather_ps` looks up the corresponding CDF value, then `_mm256_fmadd_ps` rescales it back to the original value range. | ~1.05–1.09x |
 
 \* From `filter_benchmark` on a 256×256×32 synthetic volume, 5-iteration
-average, this development machine. Actual speedup on your hardware will
-vary — the histogram equalization figure in particular is expected to stay
+average, this development machine, **built at `-O2`** (CMake's default
+`RelWithDebInfo` build type). Actual speedup on your hardware will vary —
+the histogram equalization figure in particular is expected to stay
 modest anywhere, since roughly half its work (histogram + CDF) is
 inherently scalar by design.
+
+**A measurement mistake worth documenting, not hiding:** an earlier pass at
+this benchmark was run via ad-hoc `g++` invocations that omitted `-O2`
+entirely. Under that unoptimized build, histogram equalization's AVX2 path
+measured as *16x slower* than scalar (gather-heavy code is disproportionately
+punished by missing optimization) — a result that looked like a genuine
+hardware limitation until compiling the identical source with `-O2`
+resolved it to the ~1.06x shown above, consistent across repeated runs.
+The lesson: **always benchmark a binary built the same way it will actually
+ship** (i.e. via `cmake --build build`, not a hand-typed `g++` command
+missing flags CMake would have supplied) — an unoptimized build doesn't
+just run everything uniformly slower, it can distort *relative* comparisons
+between code paths unpredictably enough to produce a wrong conclusion.
 
 **Runtime AVX2 dispatch:** every filter has three entry points —
 `<name>Scalar`, `<name>AVX2`, and a plain `<name>()` that auto-dispatches
