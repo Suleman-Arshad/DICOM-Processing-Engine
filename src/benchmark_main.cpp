@@ -29,6 +29,9 @@ namespace
             {
                 for (int x = 0; x < width; ++x)
                 {
+                    // A smooth gradient plus noise, roughly CT-HU-shaped, so
+                    // the filters have realistic structure to work on rather
+                    // than pure noise or a flat field.
                     const float gradient = -1000.0f + 2000.0f * (static_cast<float>(x) / width);
                     volume.at(x, y, z) = gradient + noise(rng);
                 }
@@ -67,17 +70,18 @@ namespace
                   << (scalarMs / avx2Ms) << "x\n";
     }
 
+    void printScalarRow(const std::string &name, double scalarMs)
+    {
+        std::cout << std::left << std::setw(22) << name << std::right << std::fixed
+                  << std::setprecision(3) << std::setw(12) << scalarMs << " ms\n";
+    }
+
 } // namespace
 
-int main()
+int main(int argc, char *argv[])
 {
-    if (!dicom::filters::cpuSupportsAVX2())
-    {
-        std::cerr << "This CPU does not support AVX2 -- a scalar-only run would not be a "
-                     "meaningful single-threaded-vs-SIMD comparison, so this benchmark exits "
-                     "rather than report misleading numbers.\n";
-        return EXIT_FAILURE;
-    }
+    const bool forceScalarOnly = (argc > 1 && std::string(argv[1]) == "--scalar-only");
+    const bool hasAVX2 = dicom::filters::cpuSupportsAVX2();
 
     constexpr int width = 256, height = 256, depth = 32;
     constexpr int iterations = 5;
@@ -85,6 +89,36 @@ int main()
               << (static_cast<size_t>(width) * height * depth) << " voxels)\n\n";
 
     const dicom::VoxelVolume volume = makeSyntheticVolume(width, height, depth);
+
+    if (!hasAVX2 || forceScalarOnly)
+    {
+        if (!hasAVX2)
+        {
+            std::cout << "This CPU does not support AVX2 -- there is no SIMD path to compare "
+                         "against, so this reports scalar throughput only (still real,\n"
+                         "useful single-threaded performance data -- just not a speedup ratio).\n\n";
+        }
+        else
+        {
+            std::cout << "--scalar-only requested -- reporting scalar throughput only.\n\n";
+        }
+
+        std::cout << std::left << std::setw(22) << "Filter" << std::right << std::setw(15)
+                  << "Scalar" << '\n';
+        std::cout << std::string(37, '-') << '\n';
+
+        printScalarRow("Gaussian Blur",
+                       timeMsAvg([&]
+                                 { dicom::filters::gaussianBlurScalar(volume, 2.0f); }, iterations));
+        printScalarRow("Sobel Edge",
+                       timeMsAvg([&]
+                                 { dicom::filters::sobelEdgeScalar(volume); }, iterations));
+        printScalarRow("Histogram Equalize",
+                       timeMsAvg([&]
+                                 { dicom::filters::histogramEqualizeScalar(volume); }, iterations));
+
+        return EXIT_SUCCESS;
+    }
 
     // --- Correctness check: AVX2 output must match scalar within epsilon ---
     const auto blurScalar = dicom::filters::gaussianBlurScalar(volume, 2.0f);
