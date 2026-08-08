@@ -1,78 +1,66 @@
 #include "dicom_processor/parser.hpp"
+
 #include <algorithm>
 #include <iostream>
 #include <limits>
 
-namespace
-{
+namespace {
 
-    void printSlice(const std::string &path, const dicom::Slice &slice)
-    {
-        std::cout << "=== " << path << " ===\n";
-        std::cout << "Modality:          " << slice.modality << '\n';
-        std::cout << "Rows x Columns:    " << slice.rows << " x " << slice.columns << '\n';
-        std::cout << "Bits Allocated:    " << slice.bitsAllocated << '\n';
-        std::cout << "Pixel Repr.:       " << (slice.pixelRepresentationSigned ? "signed" : "unsigned") << '\n';
-        std::cout << "Rescale Slope:     " << slice.rescaleSlope << '\n';
-        std::cout << "Rescale Intercept: " << slice.rescaleIntercept << '\n';
-        std::cout << "Image Position Z:  " << slice.imagePositionZ << " mm\n";
-        std::cout << "Pixel Spacing:     " << slice.pixelSpacingRowMM << " x " << slice.pixelSpacingColMM << " mm\n";
-        std::cout << "Slice Thickness:   " << slice.sliceThicknessMM << " mm\n";
-        std::cout << "Pixel Count:       " << slice.pixels.size() << '\n';
+void printSlice(const std::string& path, const dicom::Slice& slice) {
+    std::cout << "=== " << path << " ===\n";
+    std::cout << "Modality:          " << slice.modality << '\n';
+    std::cout << "Rows x Columns:    " << slice.rows << " x " << slice.columns << '\n';
+    std::cout << "Bits Allocated:    " << slice.bitsAllocated << '\n';
+    std::cout << "Pixel Repr.:       " << (slice.pixelRepresentationSigned ? "signed" : "unsigned") << '\n';
+    std::cout << "Rescale Slope:     " << slice.rescaleSlope << '\n';
+    std::cout << "Rescale Intercept: " << slice.rescaleIntercept << '\n';
+    std::cout << "Image Position Z:  " << slice.imagePositionZ << " mm\n";
+    std::cout << "Pixel Spacing:     " << slice.pixelSpacingRowMM << " x " << slice.pixelSpacingColMM << " mm\n";
+    std::cout << "Slice Thickness:   " << slice.sliceThicknessMM << " mm\n";
+    std::cout << "Pixel Count:       " << slice.pixels.size() << '\n';
 
-        if (slice.pixels.empty())
-        {
-            std::cout << "(no pixel data decoded)\n\n";
-            return;
-        }
+    if (slice.pixels.empty()) {
+        std::cout << "(no pixel data decoded)\n\n";
+        return;
+    }
 
-        const auto [minIt, maxIt] = std::minmax_element(slice.pixels.begin(), slice.pixels.end());
-        std::cout << "Raw pixel range:   [" << *minIt << ", " << *maxIt << "]\n";
+    const auto [minIt, maxIt] = std::minmax_element(slice.pixels.begin(), slice.pixels.end());
+    std::cout << "Raw pixel range:   [" << *minIt << ", " << *maxIt << "]\n";
 
-        if (slice.modality == "CT")
-        {
-            const double huMin = static_cast<double>(*minIt) * slice.rescaleSlope + slice.rescaleIntercept;
-            const double huMax = static_cast<double>(*maxIt) * slice.rescaleSlope + slice.rescaleIntercept;
-            std::cout << "HU range:          [" << huMin << ", " << huMax << "]\n";
-        }
+    if (slice.modality == "CT") {
+        const double huMin = static_cast<double>(*minIt) * slice.rescaleSlope + slice.rescaleIntercept;
+        const double huMax = static_cast<double>(*maxIt) * slice.rescaleSlope + slice.rescaleIntercept;
+        std::cout << "HU range:          [" << huMin << ", " << huMax << "]\n";
+    }
 
-        // Print a small top-left patch as a sanity-check sample, capped at 5x5 so this stays readable for both tiny synthetic test files and full 512x512 clinical images.
-        const int patch = std::min({5, slice.rows, slice.columns});
-        std::cout << "Top-left " << patch << "x" << patch << " raw pixel patch:\n";
-        for (int y = 0; y < patch; ++y)
-        {
-            std::cout << "  ";
-            for (int x = 0; x < patch; ++x)
-            {
-                const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(slice.columns) + static_cast<size_t>(x);
-                std::cout << slice.pixels[idx] << ' ';
-            }
-            std::cout << '\n';
+    const int patch = std::min({5, slice.rows, slice.columns});
+    std::cout << "Top-left " << patch << "x" << patch << " raw pixel patch:\n";
+    for (int y = 0; y < patch; ++y) {
+        std::cout << "  ";
+        for (int x = 0; x < patch; ++x) {
+            const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(slice.columns) + static_cast<size_t>(x);
+            std::cout << slice.pixels[idx] << ' ';
         }
         std::cout << '\n';
     }
+    std::cout << '\n';
+}
 
-} // namespace
+}  // namespace
 
-int main(int argc, char *argv[])
-{
-    if (argc < 2)
-    {
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
         std::cerr << "Usage: " << argv[0] << " <dicom-file> [dicom-file ...]\n";
         return EXIT_FAILURE;
     }
 
     int failures = 0;
-    for (int i = 1; i < argc; ++i)
-    {
+    for (int i = 1; i < argc; ++i) {
         const std::string path = argv[i];
-        try
-        {
+        try {
             const dicom::Slice slice = dicom::Parser::parseFile(path);
             printSlice(path, slice);
-        }
-        catch (const dicom::ParseError &e)
-        {
+        } catch (const dicom::ParseError& e) {
             std::cerr << "Parse error in '" << path << "': " << e.what() << "\n\n";
             ++failures;
         }
