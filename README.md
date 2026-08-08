@@ -12,7 +12,7 @@ custom thread pool are all implemented and correctness-verified. Output
 
 ## Project layout
 
-```
+```bash
 dicom-processor/
 ├── CMakeLists.txt
 ├── conanfile.txt
@@ -61,7 +61,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 | Binary | Purpose |
-|---|---|
+| --- | --- |
 | `dicom_processor` | Week 5: parse a DICOM file, print metadata + pixel stats |
 | `volume_reconstructor` | Week 6: stack a slice series into a 3D volume |
 | `anomaly_detector` | Week 7: full pipeline — parse, reconstruct, detect anomalies |
@@ -72,33 +72,40 @@ ctest --test-dir build --output-on-failure
 ## Usage
 
 ### Parse a single slice
+
 ```bash
 ./build/dicom_processor data/samples/ct_sample.dcm
 ```
 
 ### Reconstruct a volume from a slice series
+
 ```bash
 ./build/volume_reconstructor data/samples/series/*.dcm
 ```
 
 ### Detect anomalies end-to-end
+
 ```bash
 ./build/anomaly_detector --hu-min 100 --hu-max 1500 --min-voxels 10 data/samples/series/*.dcm
 ```
+
 Defaults to a broad calcification/dense-nodule HU range if flags are
 omitted — narrow `--hu-min`/`--hu-max` for your specific data. Prints each
 finding's centroid, bounding box, voxel count, and mean/stddev HU.
 
 ### Benchmark filters (scalar vs. AVX2)
+
 ```bash
 ./build/filter_benchmark              # auto: AVX2 table if supported, scalar-only report otherwise
 ./build/filter_benchmark --scalar-only  # force scalar-only reporting on any machine
 ```
 
 ### Measure thread pool speedup
+
 ```bash
 ./build/threadpool_benchmark
 ```
+
 Correctness-gated (won't print numbers if parallel output doesn't match
 serial), covers both Reconstruction and Detection. **Requires a
 multi-core machine for a meaningful result** — on a single-core machine
@@ -145,7 +152,7 @@ file.
 ## Supported vs. unsupported input
 
 | Feature | Status |
-|---|---|
+| --- | --- |
 | Explicit/Implicit VR, Little/Big Endian | ✅ |
 | 8-bit and 16-bit pixel data (signed and unsigned) | ✅ |
 | Compressed pixel data (JPEG/JPEG2000/RLE) | ❌ rejected with a clear error, by design |
