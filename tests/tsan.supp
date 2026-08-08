@@ -1,0 +1,23 @@
+# ThreadSanitizer suppressions.
+#
+# std::future/std::packaged_task exception propagation across threads
+# triggers a well-documented TSan false positive inside libstdc++'s
+# internal _Result<T>/exception_ptr teardown path. Root cause: libstdc++.so
+# on this system is a pre-built library not compiled with -fsanitize=thread,
+# so TSan cannot see the synchronization libstdc++ actually performs
+# internally when releasing a shared future/promise state that holds an
+# in-flight exception -- it only sees the unsynchronized-looking memory
+# access from our (instrumented) side and flags it.
+#
+# This is NOT related to dicom::ThreadPool's own queue/mutex/condition_
+# variable logic, which is exercised far harder by the 10,000-task
+# concurrent stress test in thread_pool_test.cpp and shows zero races.
+# Confirmed as a known class of issue: a near-identical stack trace
+# (std::runtime_error::~runtime_error -> _Result<T>::_M_destroy ->
+# _State_base::~_State_base) is documented at
+# https://bugzilla.redhat.com/show_bug.cgi?id=1512587
+#
+# Usage: TSAN_OPTIONS="suppressions=tests/tsan.supp" ./thread_pool_test
+
+race:std::__future_base::_Result
+race:std::__exception_ptr::exception_ptr::_M_release
