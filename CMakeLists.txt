@@ -1,44 +1,64 @@
 cmake_minimum_required(VERSION 3.20)
 project(DicomProcessor
-    VERSION 0.2.0
+    VERSION 0.3.0
     DESCRIPTION "Multi-threaded C++20 DICOM Image Processing Pipeline"
     LANGUAGES CXX
 )
 
-# --- Language standard ---------------------------------------------------
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)   # needed by clangd / editor tooling
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# --- Build type default ---------------------------------------------------
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
 
-# --- Ingestion library -------------------------------------------
+find_package(Threads REQUIRED)
+
+# --- Ingestion library (Week 5) -------------------------------------------
+# Custom binary DICOM parser. NO DCMTK dependency by design.
 add_library(dicom_ingestion STATIC
     src/vr.cpp
     src/dictionary.cpp
     src/dataset.cpp
     src/parser.cpp
 )
-target_include_directories(dicom_ingestion PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-)
+target_include_directories(dicom_ingestion PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# NOTE: AVX2 flags intentionally do NOT go here (see filters_avx2.cpp
+# below for why -- applying -mavx2 at the target/library level lets the
+# compiler auto-vectorize ordinary loops with AVX2 instructions, crashing
+# with SIGILL on non-AVX2 hardware; this bit the Ingestion Layer once).
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     target_compile_options(dicom_ingestion PUBLIC -Wall -Wextra -Wpedantic)
 endif()
 
-# --- Reconstruction library (Week 6) ---------------------------------------
+# --- Reconstruction library (Week 6 + Week 7 thread pool) -------------------
+# Stacks 2D slices into a 3D voxel volume: HU normalization, Z-position
+# sorting, trilinear interpolation to isotropic spacing (reconstruct()),
+# plus the thread-pool-parallelized variant (reconstructParallel()) and the
+# ThreadPool primitive itself (thread_pool.cpp), shared by every layer that
+# uses concurrency.
 add_library(dicom_reconstruction STATIC
     src/voxel_volume.cpp
     src/reconstruction.cpp
+    src/thread_pool.cpp
 )
-target_link_libraries(dicom_reconstruction PUBLIC dicom_ingestion)
+target_link_libraries(dicom_reconstruction PUBLIC dicom_ingestion Threads::Threads)
 
-# --- Processing library -------------------------------------------
+# --- Detection library (Week 7) ---------------------------------------------
+# 3D region growing / connected component labeling with density
+# thresholding (detect()), plus a slab-partitioned parallel variant with
+# union-find boundary merging (detectParallel()).
+add_library(dicom_detection STATIC
+    src/detection.cpp
+)
+target_link_libraries(dicom_detection PUBLIC dicom_reconstruction)
+
+# --- Processing library (Week 6) -------------------------------------------
+# SIMD-accelerated 2D filters, each with a scalar fallback and a
+# runtime-gated AVX2 path.
 add_library(dicom_processing STATIC
     src/filters_scalar.cpp
     src/filters_avx2.cpp
@@ -59,10 +79,16 @@ target_link_libraries(dicom_processor PRIVATE dicom_ingestion)
 add_executable(volume_reconstructor src/reconstruct_main.cpp)
 target_link_libraries(volume_reconstructor PRIVATE dicom_reconstruction)
 
+add_executable(anomaly_detector src/detect_main.cpp)
+target_link_libraries(anomaly_detector PRIVATE dicom_detection)
+
 add_executable(filter_benchmark src/benchmark_main.cpp)
 target_link_libraries(filter_benchmark PRIVATE dicom_processing)
 
-# --- Optional DCMTK cross-verification tool -----------------------------
+add_executable(threadpool_benchmark src/threadpool_benchmark_main.cpp)
+target_link_libraries(threadpool_benchmark PRIVATE dicom_detection)
+
+# --- Optional DCMTK cross-verification tool ---------------------------------
 option(BUILD_DCMTK_VERIFY_TOOL "Build the optional DCMTK cross-verification tool" ON)
 if(BUILD_DCMTK_VERIFY_TOOL)
     find_package(DCMTK REQUIRED)
@@ -70,7 +96,7 @@ if(BUILD_DCMTK_VERIFY_TOOL)
     target_link_libraries(dcmtk_verify PRIVATE DCMTK::DCMTK)
 endif()
 
-# --- Testing scaffold (enable later with -DBUILD_TESTING=ON) -----------
+# --- Testing (enable with -DBUILD_TESTING=ON) -------------------------------
 option(BUILD_TESTING "Build unit tests" OFF)
 if(BUILD_TESTING)
     enable_testing()
