@@ -1,4 +1,5 @@
 # Architecture Design Document
+
 ## High-Performance Medical Imaging Pipeline (DICOM Processor)
 
 **Version:** 0.3 (Week 7 — complete)
@@ -31,7 +32,7 @@ exports annotated results.
 
 ## 2. System-Level Data Flow
 
-```
+```bash
  Raw .dcm files
       │
       ▼
@@ -115,7 +116,7 @@ Reconstruction/Detection).**
 ### 5.1 SIMD filters (AVX2)
 
 | Filter | Approach | Measured speedup* |
-|---|---|---|
+| --- | --- | --- |
 | Gaussian blur | Separable convolution; interior vectorized 8-wide via `__m256`+FMA, border pixels scalar. | ~6.1–6.4x |
 | Sobel edge detection | 3×3 gradient kernels; interior vectorized, border columns scalar. | ~13–15x |
 | Histogram equalization | Histogram/CDF construction is scalar (data-dependent); the remapping pass is vectorized via `_mm256_i32gather_ps` against the CDF lookup table. | ~1.05–1.09x |
@@ -245,6 +246,7 @@ public:
 ### 8.1 Correctness verification
 
 `tests/thread_pool_test.cpp` (8 tests, all passing):
+
 - 100 tasks return correct individual results
 - 10,000 concurrent tasks each execute exactly once under contention
 - Exceptions thrown inside a task propagate correctly through `future.get()`
@@ -312,7 +314,7 @@ is outstanding.
 ## 10. Testing Strategy
 
 | Layer | Test approach | Status |
-|---|---|---|
+| --- | --- | --- |
 | Ingestion | Unit tests per VR type; Explicit/Implicit, Little/Big Endian fixtures; DCMTK cross-check. | ✅ Done |
 | Reconstruction | Linear-gradient analytic correctness check; bit-identical serial-vs-parallel across thread counts; TSan-verified. | ✅ Done |
 | Processing | AVX2-vs-scalar diff on non-multiple-of-8 volumes (stresses boundary code); `-O2`-verified benchmark. | ✅ Done |
@@ -349,7 +351,7 @@ is outstanding.
 ## 12. Week-by-Week Traceability
 
 | Week | Layer(s) touched | Deliverable | Status |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 5 | Ingestion | Custom binary parser, CT/MRI/X-Ray metadata + pixel extraction | ✅ Done |
 | 6 | Reconstruction + Processing (SIMD) | Trilinear-interpolated volume reconstruction, HU normalization, AVX2 filters + benchmark | ✅ Done |
 | 7 | Reconstruction (parallel) + Detection (serial + parallel) + Concurrency | Custom thread pool; region growing / connected component labeling anomaly detector; both parallelized; speedup benchmark tooling | ✅ Done (built & correctness-verified; multi-core speedup measurement pending real hardware) |
