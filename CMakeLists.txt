@@ -16,8 +16,7 @@ endif()
 
 find_package(Threads REQUIRED)
 
-# --- Ingestion library (Week 5) -------------------------------------------
-# Custom binary DICOM parser. NO DCMTK dependency by design.
+
 add_library(dicom_ingestion STATIC
     src/vr.cpp
     src/dictionary.cpp
@@ -26,20 +25,12 @@ add_library(dicom_ingestion STATIC
 )
 target_include_directories(dicom_ingestion PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# NOTE: AVX2 flags intentionally do NOT go here (see filters_avx2.cpp
-# below for why -- applying -mavx2 at the target/library level lets the
-# compiler auto-vectorize ordinary loops with AVX2 instructions, crashing
-# with SIGILL on non-AVX2 hardware; this bit the Ingestion Layer once).
+
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     target_compile_options(dicom_ingestion PUBLIC -Wall -Wextra -Wpedantic)
 endif()
 
 # --- Reconstruction library (Week 6 + Week 7 thread pool) -------------------
-# Stacks 2D slices into a 3D voxel volume: HU normalization, Z-position
-# sorting, trilinear interpolation to isotropic spacing (reconstruct()),
-# plus the thread-pool-parallelized variant (reconstructParallel()) and the
-# ThreadPool primitive itself (thread_pool.cpp), shared by every layer that
-# uses concurrency.
 add_library(dicom_reconstruction STATIC
     src/voxel_volume.cpp
     src/reconstruction.cpp
@@ -88,13 +79,6 @@ target_link_libraries(filter_benchmark PRIVATE dicom_processing)
 add_executable(threadpool_benchmark src/threadpool_benchmark_main.cpp)
 target_link_libraries(threadpool_benchmark PRIVATE dicom_detection)
 
-# --- Optional DCMTK cross-verification tool ---------------------------------
-option(BUILD_DCMTK_VERIFY_TOOL "Build the optional DCMTK cross-verification tool" ON)
-if(BUILD_DCMTK_VERIFY_TOOL)
-    find_package(DCMTK REQUIRED)
-    add_executable(dcmtk_verify tools/dcmtk_verify.cpp)
-    target_link_libraries(dcmtk_verify PRIVATE DCMTK::DCMTK)
-endif()
 
 # --- Testing (enable with -DBUILD_TESTING=ON) -------------------------------
 option(BUILD_TESTING "Build unit tests" OFF)

@@ -1,7 +1,3 @@
-# tests/CMakeLists.txt — enabled via -DBUILD_TESTING=ON.
-# Correctness tests, not benchmarks (those are src/*_benchmark_main.cpp).
-# Run with `ctest` from the build directory, or execute binaries directly.
-
 add_executable(thread_pool_test thread_pool_test.cpp)
 target_link_libraries(thread_pool_test PRIVATE dicom_reconstruction)
 add_test(NAME thread_pool_test COMMAND thread_pool_test)

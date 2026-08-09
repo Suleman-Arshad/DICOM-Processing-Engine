@@ -1,16 +1,5 @@
-// threadpool_benchmark_main.cpp — Week 7 Day 3 deliverable: measure
-// near-linear speedup of the custom thread pool across BOTH workloads it's
-// been applied to -- volume reconstruction (trilinear resampling) and
-// anomaly detection (region growing / connected component labeling) --
-// not a synthetic toy task for either.
-//
-// Correctness gates the benchmark for both workloads: parallel output
-// must exactly match (reconstruction) or match as a set (detection) the
-// serial reference before any timing number is trusted enough to print.
-
 #include "dicom_processor/detection.hpp"
 #include "dicom_processor/reconstruction.hpp"
-
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
@@ -18,93 +7,126 @@
 #include <random>
 #include <thread>
 
-namespace {
+namespace
+{
 
-std::vector<dicom::Slice> makeSyntheticSeries(int sliceCount, int rows, int cols) {
-    std::vector<dicom::Slice> slices;
-    slices.reserve(static_cast<size_t>(sliceCount));
-    std::mt19937 rng(7);
-    std::uniform_real_distribution<float> noise(-100.f, 100.f);
+    std::vector<dicom::Slice> makeSyntheticSeries(int sliceCount, int rows, int cols)
+    {
+        std::vector<dicom::Slice> slices;
+        slices.reserve(static_cast<size_t>(sliceCount));
+        std::mt19937 rng(7);
+        std::uniform_real_distribution<float> noise(-100.f, 100.f);
 
-    for (int z = 0; z < sliceCount; ++z) {
-        dicom::Slice s;
-        s.rows = rows;
-        s.columns = cols;
-        s.bitsAllocated = 16;
-        s.modality = "CT";
-        s.rescaleSlope = 1.0;
-        s.rescaleIntercept = -1024.0;
-        s.pixelSpacingRowMM = 0.75;
-        s.pixelSpacingColMM = 0.75;
-        s.sliceThicknessMM = 1.0;
-        s.imagePositionZ = z * 1.0;
-        s.pixels.resize(static_cast<size_t>(rows) * cols);
-        for (int y = 0; y < rows; ++y) {
-            for (int x = 0; x < cols; ++x) {
-                s.pixels[static_cast<size_t>(y) * cols + x] =
-                    static_cast<int32_t>(x + y + z + noise(rng));
+        for (int z = 0; z < sliceCount; ++z)
+        {
+            dicom::Slice s;
+            s.rows = rows;
+            s.columns = cols;
+            s.bitsAllocated = 16;
+            s.modality = "CT";
+            s.rescaleSlope = 1.0;
+            s.rescaleIntercept = -1024.0;
+            s.pixelSpacingRowMM = 0.75;
+            s.pixelSpacingColMM = 0.75;
+            s.sliceThicknessMM = 1.0;
+            s.imagePositionZ = z * 1.0;
+            s.pixels.resize(static_cast<size_t>(rows) * cols);
+            for (int y = 0; y < rows; ++y)
+            {
+                for (int x = 0; x < cols; ++x)
+                {
+                    s.pixels[static_cast<size_t>(y) * cols + x] =
+                        static_cast<int32_t>(x + y + z + noise(rng));
+                }
             }
+            slices.push_back(s);
         }
-        slices.push_back(s);
+        return slices;
     }
-    return slices;
-}
 
-// A larger volume with several planted nodules, for a detection workload
-// that's representative of real work (not a trivially-empty scan).
-dicom::VoxelVolume makeVolumeWithNodules(int size, int nodulesPerAxis) {
-    dicom::VoxelVolume volume;
-    volume.width = volume.height = volume.depth = size;
-    volume.modality = dicom::Modality::CT;
-    volume.data.assign(static_cast<size_t>(size) * size * size, -800.f);
+    // A larger volume with several planted nodules, for a detection workload
+    // that's representative of real work (not a trivially-empty scan).
+    dicom::VoxelVolume makeVolumeWithNodules(int size, int nodulesPerAxis)
+    {
+        dicom::VoxelVolume volume;
+        volume.width = volume.height = volume.depth = size;
+        volume.modality = dicom::Modality::CT;
+        volume.data.assign(static_cast<size_t>(size) * size * size, -800.f);
 
-    const int spacing = size / (nodulesPerAxis + 1);
-    const int radius = std::max(2, spacing / 6);
-    for (int iz = 1; iz <= nodulesPerAxis; ++iz) {
-        for (int iy = 1; iy <= nodulesPerAxis; ++iy) {
-            for (int ix = 1; ix <= nodulesPerAxis; ++ix) {
-                const int cx = ix * spacing, cy = iy * spacing, cz = iz * spacing;
-                for (int z = std::max(0, cz - radius); z <= std::min(size - 1, cz + radius); ++z) {
-                    for (int y = std::max(0, cy - radius); y <= std::min(size - 1, cy + radius); ++y) {
-                        for (int x = std::max(0, cx - radius); x <= std::min(size - 1, cx + radius); ++x) {
-                            const double d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy) + (z - cz) * (z - cz);
-                            if (d2 <= static_cast<double>(radius) * radius) volume.at(x, y, z) = 300.f;
+        const int spacing = size / (nodulesPerAxis + 1);
+        const int radius = std::max(2, spacing / 6);
+        for (int iz = 1; iz <= nodulesPerAxis; ++iz)
+        {
+            for (int iy = 1; iy <= nodulesPerAxis; ++iy)
+            {
+                for (int ix = 1; ix <= nodulesPerAxis; ++ix)
+                {
+                    const int cx = ix * spacing, cy = iy * spacing, cz = iz * spacing;
+                    for (int z = std::max(0, cz - radius); z <= std::min(size - 1, cz + radius); ++z)
+                    {
+                        for (int y = std::max(0, cy - radius); y <= std::min(size - 1, cy + radius); ++y)
+                        {
+                            for (int x = std::max(0, cx - radius); x <= std::min(size - 1, cx + radius); ++x)
+                            {
+                                const double d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy) + (z - cz) * (z - cz);
+                                if (d2 <= static_cast<double>(radius) * radius)
+                                    volume.at(x, y, z) = 300.f;
+                            }
                         }
                     }
                 }
             }
         }
+        return volume;
     }
-    return volume;
-}
 
-template <typename Func>
-double timeMs(Func&& f) {
-    const auto start = std::chrono::high_resolution_clock::now();
-    f();
-    const auto end = std::chrono::high_resolution_clock::now();
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
+    template <typename Func>
+    double timeMs(Func &&f)
+    {
+        const auto start = std::chrono::high_resolution_clock::now();
+        f();
+        const auto end = std::chrono::high_resolution_clock::now();
+        return std::chrono::duration<double, std::milli>(end - start).count();
+    }
 
-void printHeader(const std::string& title) {
-    std::cout << "\n=== " << title << " ===\n";
-    std::cout << std::left << std::setw(10) << "Threads" << std::right << std::setw(14) << "Time (ms)"
-              << std::setw(12) << "Speedup" << std::setw(14) << "Efficiency" << '\n';
-    std::cout << std::string(50, '-') << '\n';
-}
+    // Single-shot timing is noisy -- OS scheduling jitter, thermal/frequency
+    // scaling, and background processes can all skew one measurement enough
+    // to distort a speedup ratio. Average over several runs, matching the
+    // methodology already used in filter_benchmark.
+    template <typename Func>
+    double timeMsAvg(Func &&f, int iterations)
+    {
+        double total = 0.0;
+        for (int i = 0; i < iterations; ++i)
+        {
+            total += timeMs(f);
+        }
+        return total / iterations;
+    }
 
-void printRow(const std::string& label, double ms, double speedup, double efficiencyPct) {
-    std::cout << std::left << std::setw(10) << label << std::right << std::fixed << std::setprecision(2)
-              << std::setw(14) << ms << std::setw(11) << speedup << "x" << std::setw(13) << efficiencyPct
-              << "%\n";
-}
+    void printHeader(const std::string &title)
+    {
+        std::cout << "\n=== " << title << " ===\n";
+        std::cout << std::left << std::setw(10) << "Threads" << std::right << std::setw(14) << "Time (ms)"
+                  << std::setw(12) << "Speedup" << std::setw(14) << "Efficiency" << '\n';
+        std::cout << std::string(50, '-') << '\n';
+    }
 
-}  // namespace
+    void printRow(const std::string &label, double ms, double speedup, double efficiencyPct)
+    {
+        std::cout << std::left << std::setw(10) << label << std::right << std::fixed << std::setprecision(2)
+                  << std::setw(14) << ms << std::setw(11) << speedup << "x" << std::setw(13) << efficiencyPct
+                  << "%\n";
+    }
 
-int main() {
+} // namespace
+
+int main()
+{
     const unsigned hwThreads = std::thread::hardware_concurrency();
     std::cout << "Hardware concurrency reported: " << (hwThreads > 0 ? hwThreads : 1) << " thread(s)\n";
-    if (hwThreads <= 1) {
+    if (hwThreads <= 1)
+    {
         std::cout << "NOTE: this machine reports " << (hwThreads == 0 ? 1 : hwThreads)
                   << " CPU core(s) available. Near-linear speedup requires real hardware "
                      "parallelism to measure -- results below will correctly show ~1.0x "
@@ -126,19 +148,23 @@ int main() {
             dicom::ThreadPool checkPool(std::max(2u, hwThreads));
             const dicom::VoxelVolume parallelResult =
                 dicom::VolumeReconstructor::reconstructParallel(series, checkPool);
-            if (parallelResult.data != serialResult.data) {
+            if (parallelResult.data != serialResult.data)
+            {
                 std::cerr << "Reconstruction: parallel output mismatch -- refusing to report numbers.\n";
                 return EXIT_FAILURE;
             }
         }
         std::cout << "[PASS] Parallel reconstruction verified bit-identical to serial reference\n";
 
-        const double serialMs = timeMs([&] { dicom::VolumeReconstructor::reconstruct(series); });
+        const double serialMs = timeMsAvg([&]
+                                          { dicom::VolumeReconstructor::reconstruct(series); }, 5);
         printHeader("Reconstruction Speedup");
         printRow("1 (serial)", serialMs, 1.0, 100.0);
-        for (size_t tc : threadCounts) {
+        for (size_t tc : threadCounts)
+        {
             dicom::ThreadPool pool(tc);
-            const double parallelMs = timeMs([&] { dicom::VolumeReconstructor::reconstructParallel(series, pool); });
+            const double parallelMs = timeMsAvg([&]
+                                                { dicom::VolumeReconstructor::reconstructParallel(series, pool); }, 5);
             const double speedup = serialMs / parallelMs;
             printRow(std::to_string(tc), parallelMs, speedup, (speedup / static_cast<double>(tc)) * 100.0);
         }
@@ -160,7 +186,8 @@ int main() {
         {
             dicom::ThreadPool checkPool(std::max(2u, hwThreads));
             const auto parallelResult = dicom::AnomalyDetector::detectParallel(volume, checkPool, t);
-            if (parallelResult.size() != serialResult.size()) {
+            if (parallelResult.size() != serialResult.size())
+            {
                 std::cerr << "Detection: parallel anomaly count mismatch (" << parallelResult.size()
                           << " vs " << serialResult.size() << ") -- refusing to report numbers.\n";
                 return EXIT_FAILURE;
@@ -169,12 +196,15 @@ int main() {
         std::cout << "[PASS] Parallel detection verified to find the same " << serialResult.size()
                   << " anomalies as serial reference\n";
 
-        const double serialMs = timeMs([&] { dicom::AnomalyDetector::detect(volume, t); });
+        const double serialMs = timeMsAvg([&]
+                                          { dicom::AnomalyDetector::detect(volume, t); }, 5);
         printHeader("Detection Speedup");
         printRow("1 (serial)", serialMs, 1.0, 100.0);
-        for (size_t tc : threadCounts) {
+        for (size_t tc : threadCounts)
+        {
             dicom::ThreadPool pool(tc);
-            const double parallelMs = timeMs([&] { dicom::AnomalyDetector::detectParallel(volume, pool, t); });
+            const double parallelMs = timeMsAvg([&]
+                                                { dicom::AnomalyDetector::detectParallel(volume, pool, t); }, 5);
             const double speedup = serialMs / parallelMs;
             printRow(std::to_string(tc), parallelMs, speedup, (speedup / static_cast<double>(tc)) * 100.0);
         }
