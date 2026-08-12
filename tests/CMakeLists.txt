@@ -13,3 +13,7 @@ add_test(NAME detection_test COMMAND detection_test)
 add_executable(detection_parallel_test detection_parallel_test.cpp)
 target_link_libraries(detection_parallel_test PRIVATE dicom_detection)
 add_test(NAME detection_parallel_test COMMAND detection_parallel_test)
+
+add_executable(output_test output_test.cpp)
+target_link_libraries(output_test PRIVATE dicom_output)
+add_test(NAME output_test COMMAND output_test)
