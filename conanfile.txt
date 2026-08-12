@@ -1,5 +1,4 @@
 [requires]
-dcmtk/3.6.7
 libpng/1.6.43
 zlib/1.3.1
 
@@ -8,7 +7,6 @@ CMakeDeps
 CMakeToolchain
 
 [options]
-dcmtk/*:shared=False
 libpng/*:shared=False
 
 [layout]
