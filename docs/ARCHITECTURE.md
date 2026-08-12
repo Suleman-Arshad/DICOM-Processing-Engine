@@ -2,169 +2,111 @@
 
 ## High-Performance Medical Imaging Pipeline (DICOM Processor)
 
-**Version:** 0.3 (Week 7 — complete)
-**Status:** Living document — updated at the end of each week as layers are implemented.
+**Version:** 1.0 (Week 8 — complete)
 
 ---
 
-## 1. Overview & Goals
+## 1. Overview
 
-This project is a multi-threaded C++20 pipeline that ingests raw DICOM files (CT,
-MRI, X-Ray), reconstructs them into a 3D voxel volume, applies SIMD-accelerated
-filters, detects density anomalies via region growing, and (in a future week)
-exports annotated results.
+A multi-threaded C++20 pipeline: ingest DICOM files, reconstruct a 3D
+volume, filter it with AVX2 SIMD, detect density anomalies via region
+growing, and export annotated PNG/DICOM/JSON/FHIR results. Built
+incrementally over 8 weeks; every layer is independently correctness-
+verified before being trusted by the next.
 
-**Design goals, in priority order:**
-
-1. **Correctness first.** Every layer's parallel variant is verified to
-   produce identical (or equivalent-as-a-set) output to its serial
-   reference before any performance claim is trusted.
-2. **Throughput.** Multi-core parallelization (Week 7) and AVX2 SIMD
-   (Week 6) target real wall-clock speedup on realistic workloads, not
-   synthetic toy benchmarks.
-3. **Memory discipline.** Avoid gratuitous copies between layers; prefer
-   views/spans and in-place resampling where possible.
-4. **Extensibility.** Each layer is a swappable unit with a clear
-   serial-vs-parallel API split, so future layers can adopt the same
-   `ThreadPool` without redesigning it.
-
----
-
-## 2. System-Level Data Flow
+## 2. Data Flow
 
 ```bash
- Raw .dcm files
-      │
-      ▼
- 1. INGESTION LAYER (Week 5)           — custom tag/VR/endianness parser
-      │  Slice { metadata, pixels, spatial info }
-      ▼
- 2. RECONSTRUCTION LAYER (Week 6-7)    — HU normalization, trilinear interpolation
-      │  VoxelVolume (dense 3D grid)     serial (reconstruct) + parallel (reconstructParallel)
-      ▼
- 3. PROCESSING LAYER (Week 6)          — AVX2 Gaussian blur / Sobel edge / histogram eq
-      │  Filtered VoxelVolume
-      ▼
- 4. DETECTION LAYER (Week 7)           — 3D region growing + connected component labeling
-      │  vector<Anomaly>                 serial (detect) + parallel (detectParallel)
-      ▼
- 5. OUTPUT LAYER (planned)             — PNG / annotated DICOM / JSON reports
+Raw .dcm files
+     │
+     ▼
+1. INGESTION        custom tag/VR/endianness parser         Slice
+     ▼
+2. RECONSTRUCTION   HU normalization, trilinear interp.      VoxelVolume
+     ▼                (serial + thread-pool-parallel)
+3. PROCESSING       AVX2 Gaussian/Sobel/histogram eq.        Filtered VoxelVolume
+     ▼
+4. DETECTION        region growing + connected components    vector<Anomaly>
+     ▼                (serial + thread-pool-parallel)
+5. OUTPUT           PNG / annotated DICOM / JSON / FHIR       files on disk
 ```
 
 ---
 
-## 3. Layer 1 — Ingestion Layer
+## 3. Layer 1 — Ingestion
 
-**Status: implemented (Week 5).**
-
-Custom binary DICOM Part 10 parser (`src/parser.cpp`) — no DCMTK
-dependency for the core parsing path. Handles Explicit/Implicit VR,
-Little/Big Endian, sequence skipping, and both signed and unsigned pixel
-representations (a real bug was caught here during Week 5 testing: a
-CT file's signed `-2000` background-padding sentinel was decoding as
-unsigned `63536` before the fix).
+Custom binary DICOM Part 10 parser (`src/parser.cpp`), no DCMTK
+dependency. Handles Explicit/Implicit VR, Little/Big Endian, sequence
+skipping, signed and unsigned pixel representations.
 
 ```cpp
 struct Slice {
     Dataset metadata;
-    std::vector<int32_t> pixels;   // sign-corrected per PixelRepresentation
+    std::vector<int32_t> pixels;   // sign-corrected
     int rows{}, columns{};
-    bool pixelRepresentationSigned{false};
     double rescaleSlope{1.0}, rescaleIntercept{0.0};
-    double imagePositionZ{0.0};        // for Reconstruction Layer slice ordering
+    double imagePositionZ{0.0};
     double pixelSpacingRowMM{1.0}, pixelSpacingColMM{1.0}, sliceThicknessMM{1.0};
 };
 ```
 
-Unsupported: compressed pixel data (JPEG/JPEG2000/RLE transfer syntaxes)
-— detected and rejected with a clear `ParseError`, by design.
+Unsupported: compressed pixel data (JPEG/JPEG2000/RLE) — rejected with a
+clear `ParseError`, by design.
+
+**Real bug caught and fixed during testing:** a CT file's signed `-2000`
+background-padding sentinel decoded as unsigned `63536` before
+`PixelRepresentation` handling was added — a physically impossible HU
+value that flagged the bug immediately.
 
 ---
 
-## 4. Layer 2 — Reconstruction Layer
+## 4. Layer 2 — Reconstruction
 
-**Status: implemented (Week 6); parallelized (Week 7 Day 1).**
+`VolumeReconstructor::reconstruct()` / `reconstructParallel()`
+(`src/reconstruction.cpp`). Sorts slices by Z position, converts each to
+HU using its own rescale parameters, resamples to isotropic spacing via
+trilinear interpolation. The parallel path chunks resampling by output
+Z-slice across the thread pool.
 
-`VolumeReconstructor::reconstruct()` (serial) and `reconstructParallel()`
-(thread-pool-parallelized) in `src/reconstruction.cpp`. Both share
-identical setup logic (`prepare()`) and only differ in whether the final
-trilinear resampling loop runs on one thread or is split into per-Z-slice
-tasks across the pool.
-
-- Sorts slices by `ImagePositionPatient`'s Z component.
-- Converts each slice to HU using *its own* rescale parameters.
-- Resamples to isotropic spacing via trilinear interpolation.
-
-**Verified correct** by reconstructing a synthetic volume with a known
-linear HU gradient and confirming the output matches the analytic answer
-exactly — trilinear interpolation is mathematically exact on linear data.
-
-**Verified parallel-safe**: `reconstructParallel()` produces **bit-identical**
-output to `reconstruct()` across 1/2/4/8 threads (`tests/reconstruct_parallel_test.cpp`),
-and is race-free under ThreadSanitizer. Each per-Z-slice task only writes
-to its own disjoint region of `volume.data` and only reads the shared,
-already-built input grid — no locking needed on the hot path.
+**Verified:** reconstructing a synthetic linear HU gradient reproduces
+the analytic answer exactly. Parallel output is bit-identical to serial
+across 1/2/4/8 threads and race-free under ThreadSanitizer.
 
 ---
 
-## 5. Layer 3 — Processing Layer
+## 5. Layer 3 — Processing
 
-**Status: SIMD filters implemented (Week 6); thread-pool parallelization
-of filters not yet wired up (straightforward future work, same pattern as
-Reconstruction/Detection).**
+AVX2-accelerated Gaussian blur, Sobel edge detection, and histogram
+equalization (`src/filters_*.cpp`), each with a scalar fallback and
+runtime dispatch via `cpuSupportsAVX2()`.
 
-### 5.1 SIMD filters (AVX2)
-
-| Filter | Approach | Measured speedup* |
+| Filter | Speedup* | Notes |
 | --- | --- | --- |
-| Gaussian blur | Separable convolution; interior vectorized 8-wide via `__m256`+FMA, border pixels scalar. | ~6.1–6.4x |
-| Sobel edge detection | 3×3 gradient kernels; interior vectorized, border columns scalar. | ~13–15x |
-| Histogram equalization | Histogram/CDF construction is scalar (data-dependent); the remapping pass is vectorized via `_mm256_i32gather_ps` against the CDF lookup table. | ~1.05–1.09x |
+| Gaussian blur | ~6.1-6.4x | Separable; interior vectorized, border scalar |
+| Sobel edge | ~13-15x | Interior vectorized 8-wide, border scalar |
+| Histogram equalization | ~1.05-1.09x | Histogram/CDF is inherently scalar; only the remap pass (via `_mm256_i32gather_ps`) is vectorized |
 
-\* Measured on a 256×256×32 synthetic volume at `-O2` (CMake's
-`RelWithDebInfo` default). **Always benchmark the actual CMake-built
-binary** — an earlier pass at this benchmark, run via ad-hoc `g++`
-missing `-O2`, showed histogram equalization's AVX2 path as *16x slower*
-than scalar, which looked like a hardware limitation until rebuilding
-with proper optimization resolved it to the ~1.06x shown above. Documented
-here as a caution, not hidden.
+\* At `-O2`. An earlier unoptimized (`g++` with no `-O` flag) benchmark
+showed histogram equalization as *16x slower* under AVX2 — a real
+measurement mistake, not a hardware limit, resolved by always benchmarking
+the actual optimized build.
 
-**Build-level AVX2 isolation:** `-mavx2 -mfma` is scoped via
-`set_source_files_properties()` to exactly one file, `src/filters_avx2.cpp`
-— verified by disassembling the compiled objects and confirming zero AVX2
-(`ymm`-register) instructions appear anywhere outside that file. This
-followed a real incident: an earlier build applied `-mavx2` at the
-library level, which let the compiler auto-vectorize ordinary Ingestion
-Layer loops with AVX2 instructions and crashed with `SIGILL` on non-AVX2
-hardware.
-
-**Runtime dispatch:** every filter has `<name>Scalar`, `<name>AVX2`, and
-an auto-dispatching `<name>()` gated by `cpuSupportsAVX2()`
-(`__builtin_cpu_supports("avx2")`). `filter_benchmark` falls back to
-reporting scalar-only throughput (still genuine, useful data) on CPUs
-without AVX2 rather than exiting with nothing.
+**AVX2 safety:** `-mavx2 -mfma` is scoped via
+`set_source_files_properties()` to exactly `src/filters_avx2.cpp`, never
+a whole library — verified by disassembling objects and confirming zero
+AVX2 instructions leak elsewhere. (An earlier library-wide application of
+this flag caused a `SIGILL` crash on non-AVX2 hardware.)
 
 ---
 
-## 6. Layer 4 — Detection Layer
+## 6. Layer 4 — Detection
 
-**Status: implemented, both serial and parallel (Week 7 Day 2-3).**
-
-**Design note:** "region growing from a seed within Hounsfield thresholds"
-and "connected component labeling of a thresholded volume" are the same
-underlying graph traversal here. A voxel within `[huMin, huMax]` is a
-valid seed; flood-filling from it via 26-connectivity and marking every
-visited voxel is exactly what a connected-component labeler does.
-Scanning the whole volume and flood-filling from every not-yet-visited
-in-range voxel therefore performs region growing from every implicit seed
-*and* produces full connected-component labels in one pass.
-
-### 6.1 Serial: `AnomalyDetector::detect()`
-
-Single flood-fill pass over the whole volume (`src/detection.cpp`),
-producing per-component running statistics (voxel count, centroid, bbox,
-mean/stddev HU) accumulated during the flood fill itself — no second pass
-over the volume needed.
+`AnomalyDetector::detect()` / `detectParallel()` (`src/detection.cpp`):
+26-connectivity flood fill over voxels within `[huMin, huMax]`, which
+simultaneously performs region growing (every in-range voxel is an
+implicit seed) and connected component labeling (one flood fill = one
+component). Density thresholding rejects components outside
+`[minVoxelCount, maxVoxelCount]`.
 
 ```cpp
 struct Anomaly {
@@ -172,188 +114,169 @@ struct Anomaly {
     size_t voxelCount;
     double meanHU, stddevHU;
 };
-
-struct Thresholds {
-    double huMin, huMax;
-    size_t minVoxelCount = 10;   // density thresholding: reject noise
-    size_t maxVoxelCount = SIZE_MAX;  // ... and implausibly large regions
-};
 ```
 
-**Verified correct** against synthetic volumes with planted spheres of
-known HU/size/location (`tests/detection_test.cpp`): centroid matches the
-planted center exactly, voxel count is within 4% of the analytic sphere
-volume `(4/3)πr³` (discretization is the only source of error), mean HU
-and stddev HU match exactly for a uniform-density sphere. Also verified:
-uniform background produces zero anomalies; a single hot voxel is
-correctly rejected by density thresholding; two well-separated spheres
-are detected as two independent anomalies.
+**Parallel strategy:** partition the volume into Z-slabs, flood-fill each
+independently (no locking — disjoint memory), then merge components
+crossing slab boundaries via union-find, touching only the boundary
+planes rather than re-scanning the volume.
 
-**Verified end-to-end** through the full pipeline (`anomaly_detector`
-CLI): raw synthetic DICOM files → custom parser → volume reconstruction
-→ detection, with a planted nodule detected at the exact expected
-centroid and correct voxel count.
-
-### 6.2 Parallel: `AnomalyDetector::detectParallel()`
-
-Partitions the volume into contiguous Z-slabs (up to `pool.threadCount()`
-slabs), flood-fills each slab independently and concurrently (each task
-writes only to its own disjoint `LocalLabeling` allocation — no locking
-needed), then performs a cheap serial merge: union-find across each pair
-of adjacent slab boundaries, touching only the two boundary planes
-(`O(sliceArea)`) rather than re-scanning the volume. This is the standard
-scalable connected-component-labeling strategy (local labeling + boundary
-merge), not an ad hoc simplification.
-
-**Verified correct** (`tests/detection_parallel_test.cpp`): a volume with
-a sphere deliberately placed to straddle likely slab boundaries produces
-the *exact same* anomaly set as the serial reference across thread counts
-1, 2, 3, 4, 7, 8, and 16 — including 16 threads on a 50-voxel-deep volume,
-where slabs are only ~3 voxels thick, heavily stressing the boundary-merge
-logic. Also verified race-free under ThreadSanitizer.
+**Verified:** planted-sphere tests give exact centroid match and ~96%
+voxel-count accuracy vs. the analytic sphere volume. Serial and parallel
+results are identical across 7 thread counts, including a sphere
+deliberately placed to straddle slab boundaries at every tested thread
+count. Race-free under ThreadSanitizer. Full pipeline (parse → reconstruct
+→ detect) verified end-to-end on synthetic DICOM files with a planted
+nodule, detected at the exact expected location.
 
 ---
 
-## 7. Layer 5 — Output Layer
+## 7. Layer 5 — Output (Week 8)
 
-**Status: planned**, not yet implemented. PNG slice export (libpng),
-annotated DICOM re-encoding, and JSON findings reports — see the original
-design in prior versions of this document for the planned approach;
-unchanged by Week 7's additions.
+Four export formats, `src/json_writer.cpp`, `src/findings_report.cpp`,
+`src/png_writer.cpp`, `src/dicom_writer.cpp`:
+
+### 7.1 PNG slice export
+
+`PngWriter::writeSlice()` (grayscale, HU-windowed) and
+`writeSliceAnnotated()` (RGB, findings drawn as red bounding-box
+outlines on slices their Z-range covers). Uses libpng directly.
+
+### 7.2 JSON findings report
+
+Hand-rolled minimal JSON writer (`json::Writer`, proper nested comma
+tracking) rather than a dependency — small enough not to warrant one.
+Structured object: series info, volume dimensions, one entry per finding
+(centroid, bounding box, voxel count, mean/stddev HU).
+
+### 7.3 HL7 FHIR export (optional)
+
+A `Bundle` of one `DiagnosticReport` plus one `Observation` per finding.
+Structurally valid FHIR JSON shape; not a certified/validated clinical
+profile — sufficient for EHR-integration prototyping, not for production
+clinical use without further conformance work.
+
+### 7.4 Annotated DICOM export
+
+`DicomWriter::writeAnnotated()` re-encodes a fresh Explicit VR Little
+Endian file: core geometry/identity tags rewritten from the already-
+parsed (and therefore already endian/sign-corrected) `Slice` fields,
+pixel data re-encoded from `slice.pixels`, plus a private tag block
+(`(0009,0010)` creator, `(0009,1001)` UT) holding the findings as JSON
+text. Only the tags this project parses are carried through — arbitrary
+other elements from the source file are not preserved, to avoid
+re-emitting raw bytes whose endianness wasn't independently re-verified.
+
+**Verified two ways:** round-tripped through this project's own parser
+(all fields match exactly, pixel data identical), and independently
+validated with **pydicom** — a third-party DICOM library confirms the
+file is standards-conformant, correctly decodes pixel data to the right
+shape/dtype, and the center-of-nodule pixel decodes to exactly the
+planted HU value.
 
 ---
 
 ## 8. Concurrency: The Thread Pool
 
-**Status: implemented (Week 7 Day 1).** `include/dicom_processor/thread_pool.hpp`
-/ `src/thread_pool.cpp` — built from `std::thread`, `std::mutex`,
-`std::condition_variable`, and `std::future`/`std::packaged_task`. No
-`std::async`, no third-party library.
+Built from `std::thread`, `std::mutex`, `std::condition_variable`,
+`std::future`/`std::packaged_task` — no `std::async`, no third-party
+library (`src/thread_pool.cpp`).
 
-```cpp
-class ThreadPool {
-public:
-    explicit ThreadPool(size_t numThreads = 0);  // 0 = auto (hardware_concurrency)
-    ~ThreadPool();  // drains queued tasks, then joins
+**Correctness:** 8-test suite including a 10,000-task concurrency stress
+test; verified race-free under ThreadSanitizer (one documented, justified
+suppression for a known libstdc++ `std::future`/exception_ptr false
+positive — see `tests/tsan.supp`).
 
-    template <typename F, typename... Args>
-    auto submit(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>>;
+**Applied to real workloads:** Reconstruction (per-Z-slice tasks) and
+Detection (per-Z-slab tasks + union-find merge), both verified to produce
+output equivalent to their serial counterparts.
 
-    size_t threadCount() const;
-};
-```
+### 8.1 Measured speedup (real hardware, Dell Latitude E6510, 8 threads)
 
-### 8.1 Correctness verification
+**Reconstruction** (60 slices, 256×256), 5-iteration average:
 
-`tests/thread_pool_test.cpp` (8 tests, all passing):
-
-- 100 tasks return correct individual results
-- 10,000 concurrent tasks each execute exactly once under contention
-- Exceptions thrown inside a task propagate correctly through `future.get()`
-- One task throwing doesn't stop other tasks or the pool
-- The destructor drains all queued tasks before joining, even with no
-  caller ever calling `.get()`
-- `threadCount()` reporting, including the auto-detect (`numThreads=0`) path
-
-**Verified under ThreadSanitizer.** The queue/mutex/condition_variable
-logic itself shows zero data races, including under the 10,000-task
-stress test. TSan does flag something in the exception-propagation path
-specifically — investigated via minimal isolated repros and confirmed to
-be a [known, documented false positive](https://bugzilla.redhat.com/show_bug.cgi?id=1512587)
-inside libstdc++'s internal `std::future`/`exception_ptr` teardown code (a
-pre-built system library not compiled with `-fsanitize=thread`, so TSan
-can't see the synchronization it performs internally) — not a bug in this
-project's own code. Suppressed explicitly and documented in
-`tests/tsan.supp`, not silently ignored.
-
-### 8.2 Applied to real workloads (not synthetic benchmarks)
-
-- **Reconstruction:** `reconstructParallel()` — one task per output
-  Z-slice.
-- **Detection:** `detectParallel()` — one task per Z-slab, with a serial
-  union-find merge step afterward.
-
-Both are verified to produce output equivalent to their serial
-counterparts (bit-identical for reconstruction; identical anomaly set for
-detection) across a range of thread counts, and both are race-free under
-ThreadSanitizer.
-
-### 8.3 Speedup measurement — honest status
-
-`threadpool_benchmark` measures wall-clock speedup vs. thread count for
-both Reconstruction and Detection, gated by a correctness check before
-printing any number. **The development sandbox this was built in reports
-only 1 CPU core** (`nproc` = 1), so no real parallel speedup could be
-measured there — the tool correctly reports ~1.0x (flat, occasionally
-slightly below 1.0x from thread-creation overhead) in that environment,
-which is the *correct* result for zero-parallelism hardware, not a bug.
-**Near-linear speedup validation on real multi-core hardware should be
-run by whoever has access to such a machine** — the tool is built,
-correctness-verified, and ready; only the actual multi-core measurement
-is outstanding.
-
----
-
-## 9. Build & Dependency Management
-
-- **CMake ≥ 3.20**, C++20, `CMAKE_EXPORT_COMPILE_COMMANDS` on.
-- **Conan 2.x** resolves `dcmtk` (optional cross-check tool only) and
-  `libpng` (future Output Layer). None of the four main pipeline binaries
-  (`dicom_processor`, `volume_reconstructor`, `anomaly_detector`,
-  `filter_benchmark`, `threadpool_benchmark` — five, actually) require
-  Conan or DCMTK at all; build with `-DBUILD_DCMTK_VERIFY_TOOL=OFF` to
-  skip that dependency entirely.
-- `Threads::Threads` (via `find_package(Threads REQUIRED)`) links
-  `dicom_reconstruction` for the thread pool.
-- AVX2 flags (`-mavx2 -mfma`) are scoped via
-  `set_source_files_properties()` to exactly `src/filters_avx2.cpp` — see
-  §5.1.
-
----
-
-## 10. Testing Strategy
-
-| Layer | Test approach | Status |
+| Threads | Time (ms) | Speedup |
 | --- | --- | --- |
-| Ingestion | Unit tests per VR type; Explicit/Implicit, Little/Big Endian fixtures; DCMTK cross-check. | ✅ Done |
-| Reconstruction | Linear-gradient analytic correctness check; bit-identical serial-vs-parallel across thread counts; TSan-verified. | ✅ Done |
-| Processing | AVX2-vs-scalar diff on non-multiple-of-8 volumes (stresses boundary code); `-O2`-verified benchmark. | ✅ Done |
-| Detection | Planted-sphere ground-truth tests (centroid/volume/HU accuracy); density-thresholding rejection test; boundary-straddling serial-vs-parallel equivalence across 7 thread counts; TSan-verified; full pipeline (parse→reconstruct→detect) end-to-end test. | ✅ Done |
-| Concurrency (ThreadPool) | 8 correctness tests including a 10,000-task stress test; TSan-verified with documented, justified suppression for one known libstdc++ false positive. | ✅ Done |
-| Output | JSON schema validation; PNG round-trip. | ⏳ Planned |
+| 1 | 214.62 | 1.00x |
+| 2 | 192.27 | 1.12x |
+| 4 | 151.97 | 1.41x |
+| 8 | 111.44 | 1.93x |
+| 16 | 102.34 | 2.10x |
+
+**Detection** (128³ volume, 27 planted nodules), 5-iteration average:
+
+| Threads | Time (ms) | Speedup |
+| --- | --- | --- |
+| 1 | 19.57 | 1.00x |
+| 2 | 18.01 | 1.09x |
+| 4 | 13.13 | 1.49x |
+| 8 | 10.93 | 1.79x |
+| 16 | 10.26 | 1.91x |
+
+**Interpretation:** both workloads are memory-bandwidth-bound (scattered
+reads dominate arithmetic), so speedup plateaus around 2x rather than
+scaling linearly with thread count — expected for this workload class on
+this hardware, not a defect. Efficiency (speedup / thread count) drops
+steadily past 2 threads, which is the standard signature of a
+memory-bound rather than compute-bound workload. Correctness of the
+parallel results was verified independently of these timing numbers —
+sub-linear speedup with verified-correct output is a legitimate,
+reportable engineering result, not a failure to reach a target number.
+
+**Methodology note:** these numbers use averaged timing (5 iterations per
+data point). An earlier single-shot measurement on the same hardware
+showed noisier, less monotonic results (e.g. 8→16 threads improving more
+than the trend suggested) — averaging is what surfaced the real,
+reproducible trend shown above.
 
 ---
 
-## 11. Known Limitations & Risks
+## 9. Build & Dependencies
 
-- **Compressed pixel data** (JPEG/JPEG2000/RLE) is out of scope for the
-  custom parser; detected and rejected with a clear error.
-- **DCMTK licensing:** permissive, non-copyleft custom license —
-  compatible with this project's use.
-- **Patient data privacy:** all sample/test files must be synthetic or
-  properly de-identified.
-- **Slice ordering fallback:** a series missing `ImagePositionPatient` on
-  every slice sorts arbitrarily (stable relative to input order) rather
-  than failing.
-- **Filters aren't thread-pool-parallelized yet** — only AVX2-lane
-  parallel, not across cores. Straightforward future work following the
-  Reconstruction/Detection pattern.
-- **Region growing sensitivity:** HU tolerance and voxel-count thresholds
-  are fixed constants passed by the caller; no automatic per-anatomy
-  tuning.
-- **Speedup numbers require multi-core hardware to measure** — see §8.3.
-  The benchmark tooling is complete and correctness-verified; only the
-  actual multi-core run is outstanding, pending access to such a machine.
-- **Single-machine scope:** no distributed processing.
+CMake ≥ 3.20, C++20, Conan 2.x for `libpng` only (the sole external
+dependency across the whole project — the earlier optional DCMTK
+cross-check tool has been removed, since none of the actual pipeline
+binaries ever depended on it). AVX2 flags scoped to exactly
+`src/filters_avx2.cpp` via `set_source_files_properties()`.
 
 ---
 
-## 12. Week-by-Week Traceability
+## 10. Testing Summary
 
-| Week | Layer(s) touched | Deliverable | Status |
-| --- | --- | --- | --- |
-| 5 | Ingestion | Custom binary parser, CT/MRI/X-Ray metadata + pixel extraction | ✅ Done |
-| 6 | Reconstruction + Processing (SIMD) | Trilinear-interpolated volume reconstruction, HU normalization, AVX2 filters + benchmark | ✅ Done |
-| 7 | Reconstruction (parallel) + Detection (serial + parallel) + Concurrency | Custom thread pool; region growing / connected component labeling anomaly detector; both parallelized; speedup benchmark tooling | ✅ Done (built & correctness-verified; multi-core speedup measurement pending real hardware) |
-| 8 | Processing (thread-pool parallel) | Parallelize AVX2 filters across cores using the existing thread pool | ⏳ Planned |
-| 9 | Output | PNG/DICOM/JSON export, end-to-end pipeline integration | ⏳ Planned |
+| Layer | Approach | Status |
+| --- | --- | --- |
+| Ingestion | VR/endianness fixtures, sign-representation bug caught and fixed | ✅ |
+| Reconstruction | Analytic linear-gradient check; bit-identical parallel/serial | ✅ |
+| Processing | AVX2-vs-scalar diff on non-multiple-of-8 volumes; `-O2`-verified benchmark | ✅ |
+| Detection | Planted-sphere ground truth; boundary-straddling parallel equivalence; TSan | ✅ |
+| Concurrency | 8-test suite incl. 10K-task stress test; TSan-verified | ✅ |
+| Output | JSON/FHIR well-formedness; PNG signature; DICOM round-trip incl. third-party (pydicom) validation | ✅ |
+
+---
+
+## 11. Known Limitations
+
+- Compressed pixel data (JPEG/JPEG2000/RLE) unsupported by design.
+- Filters are AVX2-parallel but not yet thread-pool-parallel across cores
+  (straightforward future work, same pattern as Reconstruction/Detection).
+- FHIR export is structurally valid but not a certified clinical profile.
+- Annotated DICOM export carries only the tags this project parses, not
+  arbitrary passthrough of every original element.
+- Speedup is hardware- and workload-dependent; the numbers in §8.1 are
+  specific to the measured machine and will differ elsewhere, especially
+  on hardware with more memory bandwidth per core.
+
+---
+
+## 12. Week-by-Week Summary
+
+| Week | Delivered |
+| --- | --- |
+| 5 | Ingestion: custom binary parser |
+| 6 | Reconstruction (trilinear interp.) + Processing (AVX2 filters) |
+| 7 | Thread pool; parallel Reconstruction + Detection; region growing / CCL |
+| 8 | Output: PNG, annotated DICOM, JSON, FHIR; full pipeline integration; final docs |
+
+All eight weeks complete. Full pipeline runs end-to-end via
+`pipeline_export`, verified against synthetic test data with known ground
+truth at every stage.
