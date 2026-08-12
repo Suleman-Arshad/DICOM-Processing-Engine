@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(DicomProcessor
-    VERSION 0.3.0
+    VERSION 1.0.0
     DESCRIPTION "Multi-threaded C++20 DICOM Image Processing Pipeline"
     LANGUAGES CXX
 )
@@ -15,8 +15,9 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 find_package(Threads REQUIRED)
+find_package(PNG REQUIRED)
 
-
+# --- Ingestion library (Week 5) ---------------------------------------------
 add_library(dicom_ingestion STATIC
     src/vr.cpp
     src/dictionary.cpp
@@ -25,12 +26,14 @@ add_library(dicom_ingestion STATIC
 )
 target_include_directories(dicom_ingestion PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-
+# NOTE: AVX2 flags intentionally NOT applied here or at any library level
+# except filters_avx2.cpp -- see that file for why (SIGILL on non-AVX2
+# hardware if applied broadly).
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     target_compile_options(dicom_ingestion PUBLIC -Wall -Wextra -Wpedantic)
 endif()
 
-# --- Reconstruction library (Week 6 + Week 7 thread pool) -------------------
+# --- Reconstruction library (Week 6-7: volume + thread pool) ----------------
 add_library(dicom_reconstruction STATIC
     src/voxel_volume.cpp
     src/reconstruction.cpp
@@ -39,17 +42,12 @@ add_library(dicom_reconstruction STATIC
 target_link_libraries(dicom_reconstruction PUBLIC dicom_ingestion Threads::Threads)
 
 # --- Detection library (Week 7) ---------------------------------------------
-# 3D region growing / connected component labeling with density
-# thresholding (detect()), plus a slab-partitioned parallel variant with
-# union-find boundary merging (detectParallel()).
 add_library(dicom_detection STATIC
     src/detection.cpp
 )
 target_link_libraries(dicom_detection PUBLIC dicom_reconstruction)
 
-# --- Processing library (Week 6) -------------------------------------------
-# SIMD-accelerated 2D filters, each with a scalar fallback and a
-# runtime-gated AVX2 path.
+# --- Processing library (Week 6: SIMD filters) ------------------------------
 add_library(dicom_processing STATIC
     src/filters_scalar.cpp
     src/filters_avx2.cpp
@@ -63,7 +61,18 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     set_source_files_properties(src/filters_avx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 endif()
 
-# --- Executables -----------------------------------------------------------
+# --- Output library (Week 8) -------------------------------------------------
+# JSON findings report + optional FHIR export, PNG slice export (libpng),
+# and annotated DICOM re-encoding.
+add_library(dicom_output STATIC
+    src/json_writer.cpp
+    src/findings_report.cpp
+    src/png_writer.cpp
+    src/dicom_writer.cpp
+)
+target_link_libraries(dicom_output PUBLIC dicom_detection PNG::PNG)
+
+# --- Executables -------------------------------------------------------------
 add_executable(dicom_processor src/main.cpp)
 target_link_libraries(dicom_processor PRIVATE dicom_ingestion)
 
@@ -79,8 +88,10 @@ target_link_libraries(filter_benchmark PRIVATE dicom_processing)
 add_executable(threadpool_benchmark src/threadpool_benchmark_main.cpp)
 target_link_libraries(threadpool_benchmark PRIVATE dicom_detection)
 
+add_executable(pipeline_export src/pipeline_export.cpp)
+target_link_libraries(pipeline_export PRIVATE dicom_output)
 
-# --- Testing (enable with -DBUILD_TESTING=ON) -------------------------------
+# --- Testing (enable with -DBUILD_TESTING=ON) --------------------------------
 option(BUILD_TESTING "Build unit tests" OFF)
 if(BUILD_TESTING)
     enable_testing()
