@@ -1,4 +1,4 @@
-# DICOM Processor
+# DICOM-Processing-Engine
 
 A multi-threaded C++20 DICOM image processing pipeline: custom binary
 ingestion, 3D volume reconstruction, AVX2-accelerated filtering, a custom
@@ -13,7 +13,6 @@ for the full design and measured performance results.
 ## Project layout
 
 ``` bash
-dicom-processor/
 ├── CMakeLists.txt
 ├── conanfile.txt
 ├── docs/ARCHITECTURE.md
@@ -25,13 +24,28 @@ dicom-processor/
 │   ├── filters.hpp                                                 # Processing
 │   ├── json_writer.hpp, findings_report.hpp,
 │   │   png_writer.hpp, dicom_writer.hpp                            # Output
-├── src/                        # one .cpp per header above, plus:
-│   ├── main.cpp                     -> dicom_processor
-│   ├── reconstruct_main.cpp         -> volume_reconstructor
-│   ├── detect_main.cpp              -> anomaly_detector
-│   ├── benchmark_main.cpp           -> filter_benchmark
-│   ├── threadpool_benchmark_main.cpp -> threadpool_benchmark
-│   └── pipeline_export.cpp          -> pipeline_export (full pipeline)
+├── src/
+│   ├── vr.cpp                       # Ingestion
+│   ├── dictionary.cpp                # Ingestion
+│   ├── dataset.cpp                   # Ingestion
+│   ├── parser.cpp                    # Ingestion
+│   ├── main.cpp                      # Ingestion CLI -> dicom_processor
+│   ├── voxel_volume.cpp              # Reconstruction
+│   ├── reconstruction.cpp            # Reconstruction (serial + parallel)
+│   ├── reconstruct_main.cpp          # Reconstruction CLI -> volume_reconstructor
+│   ├── thread_pool.cpp               # Concurrency
+│   ├── detection.cpp                 # Detection (serial + parallel)
+│   ├── detect_main.cpp               # Detection CLI -> anomaly_detector
+│   ├── filters_scalar.cpp            # Processing (scalar reference filters)
+│   ├── filters_avx2.cpp              # Processing (AVX2-accelerated filters)
+│   ├── filters_dispatch.cpp          # Processing (runtime AVX2 dispatch)
+│   ├── benchmark_main.cpp            # Processing CLI -> filter_benchmark
+│   ├── threadpool_benchmark_main.cpp # Concurrency CLI -> threadpool_benchmark
+│   ├── json_writer.cpp               # Output
+│   ├── findings_report.cpp           # Output (JSON + FHIR)
+│   ├── png_writer.cpp                # Output (PNG export)
+│   ├── dicom_writer.cpp              # Output (annotated DICOM export)
+│   └── pipeline_export.cpp           # Output CLI -> pipeline_export (full pipeline)
 ├── tests/          # thread_pool, reconstruct_parallel, detection,
 │                    # detection_parallel, output -- all ctest-runnable
 └── data/samples/    # your test .dcm files (not committed)
